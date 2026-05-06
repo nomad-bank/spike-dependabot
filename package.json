@@ -2,6 +2,9 @@
   "name": "spike-dependabot",
   "version": "1.0.0",
   "license": "MIT",
+  "devDependencies": {
+    "@cursor/sdk": "1.0.12"
+  },
   "dependencies": {
     "axios": "0.21.1",
     "hot-formula-parser": "3.0.2",

@@ -1,80 +1,100 @@
-# 🛡️ Security Fixer Automation
+# Security Fixer Automation
 
-> **Remediação Proativa de Vulnerabilidades com Self-Healing PRs.**
+> Remediação proativa de vulnerabilidades com Self-Healing PRs via Cursor Agent.
 
-Este repositório implementa um modelo **Automated-Proactive** de remediação de segurança. O objetivo é transformar o processo manual de correção de vulnerabilidades num fluxo de [Self-Healing PRs](https://dev.to/akhil_mittal/self-healing-architecture-aws-24ao), eliminando o esforço manual repetitivo e reduzindo o volume de Pull Requests individuais abertos pelo Dependabot.
-
----
-
-## 🗺️ Fluxo do Script
-
-Para entender como a engine processa cada vulnerabilidade, consulte o diagrama abaixo:
-
-![Fluxo do Script Cursor-fixer](workflow-diagram.png)
+Este repositório implementa um modelo **Automated-Proactive** de remediação de segurança. O fluxo lê os alertas abertos do Dependabot, passa o contexto completo para um agente Cursor via SDK e deixa a IA aplicar as correções diretamente — bump direto ou override, conforme a análise do grafo — consolidando tudo em um único PR.
 
 ---
 
-## 🚀 O que este projeto resolve?
+## Fluxo
 
-* **Consolidação Inteligente:** Agrupa múltiplos alertas (Critical a Low) num **único PR** na branch fixa `security/dependabot-remediation`.
-* **Análise de Grafo:** Identifica se a vulnerabilidade é direta ou transitiva e escolhe a melhor estratégia de correção.
-* **Validação de Integridade:** Diferente do Dependabot padrão, este script roda seus scripts de `build` e `test` antes de sugerir a correção.
-* **Multi-Gerenciador:** Suporte nativo e automático para `npm`, `pnpm` e `yarn`.
-
----
-
-## 🛠️ Estratégia de Remediação (Árvore de Decisão)
-
-A engine `cursor-fixer.js` analisa o grafo de dependências e aplica o princípio de **Shift-Left Security**:
-
-| Cenário | Ação Realizada | Comando / Técnica |
-| :--- | :--- | :--- |
-| **Dependência Direta** | Atualização de versão fixa | `add --save-exact` |
-| **Indireta Rasa (≤ 2 níveis)** | Pin do pacote na raiz | `add` (transitivo) |
-| **Indireta Profunda (> 2 níveis)** | Injeção de Resolução | `overrides` ou `resolutions` |
-| **Major Leap (Salto de Versão)** | Override de Segurança | Força versão patchada no `package.json` |
-
-> [!IMPORTANT]
-> **Fallback de Segurança:** Se um comando de atualização falhar, o script injeta automaticamente o override como contingência para garantir a remediação.
+```
+GitHub Actions (schedule / dispatch)
+  └─ cursor-fixer.js
+       ├─ gh api → lê alertas Dependabot abertos (npm)
+       ├─ npm ls → grafo por pacote
+       ├─ <package-manager> audit → log completo
+       ├─ buildRemediationPrompt()
+       │    └─ docs/verify-issues-dependabot.md + alertas + package.json atual
+       ├─ callCursorAgent()  ← @cursor/sdk · Agent.prompt · local runtime
+       │    └─ Agente edita package.json e roda install
+       └─ git commit + push → branch security/dependabot-remediation
+```
 
 ---
 
-## ⚙️ Configuração e Setup
+## O que este projeto resolve
+
+- **Análise real por IA:** O Cursor Agent recebe o guia de remediação (`docs/verify-issues-dependabot.md`), o grafo de dependências e o audit log completo, e decide a estratégia mais adequada para cada pacote.
+- **Consolidação em um PR:** Todos os alertas são tratados numa única branch fixa (`security/dependabot-remediation`), eliminando o ruído de PRs individuais do Dependabot.
+- **Versões exatas:** O agente é instruído a nunca usar `^` ou `~` — todas as versões são fixas por política do repositório.
+- **Multi-gerenciador:** Detecção automática de `pnpm` (lockfile `pnpm-lock.yaml`) ou `npm`.
+
+---
+
+## Estratégia de remediação
+
+O guia completo está em [`docs/verify-issues-dependabot.md`](docs/verify-issues-dependabot.md). Em resumo:
+
+| Cenário | Ação |
+| :--- | :--- |
+| Dependência direta | Bump com versão fixa (`add --save-exact`) |
+| Transitiva rasa | Bump do pacote pai ou pin na raiz |
+| Transitiva profunda / conflito de major | `pnpm.overrides` / `overrides` com versão exata |
+
+---
+
+## Configuração e Setup
 
 ### 1. Personal Access Token (PAT)
-O `GITHUB_TOKEN` padrão tem limitações. Configure um **Fine-grained PAT** com as seguintes permissões:
-- `Dependabot alerts`: **Read-only**
-- `Contents`: **Write**
-- `Pull requests`: **Write**
 
-### 2. Secrets do Repositório
+Configure um **Fine-grained PAT** com as seguintes permissões:
+
+- `Dependabot alerts`: Read-only
+- `Contents`: Write
+- `Pull requests`: Write
+
+### 2. Secrets do repositório
+
 No GitHub, vá em *Settings > Secrets and variables > Actions*:
 
 | Secret | Descrição |
 | :--- | :--- |
-| `GH_DEPENDABOT_ALERTS_TOKEN` | O PAT gerado no passo anterior (Obrigatório). |
-| `SECURITY_PACKAGE_ROOT` | Caminho do `package.json` (normalmente `.` na raiz do repo). |
+| `GH_DEPENDABOT_ALERTS_TOKEN` | PAT com acesso aos alertas Dependabot (obrigatório). |
+| `CURSOR_TOKEN` | API key do Cursor (`cursor_...`), obtida em [cursor.com/dashboard/cloud-agents](https://cursor.com/dashboard/cloud-agents). |
+
+### 3. Variável de repositório (opcional)
+
+| Variável | Descrição | Default |
+| :--- | :--- | :--- |
+| `SECURITY_PACKAGE_ROOT` | Caminho relativo ao `package.json` alvo. | `.` |
 
 ---
 
-## 🤖 Integração com Cursor AI
+## Integração com Cursor AI
 
-Para triagem manual ou casos onde a automação exige supervisão humana (ex: conflitos de build):
+O agente recebe o contexto montado por `buildRemediationPrompt()`:
 
-1. **Contexto de Segurança:** Use `@docs/verify-issues-dependabot.md` no chat do Cursor.
-2. **Regras de Automação:** O ficheiro `.cursor/rules/security-automation.mdc` orienta a IA sobre as políticas da empresa.
+1. Conteúdo completo de `docs/verify-issues-dependabot.md` como guia de decisão.
+2. Lista de alertas abertos com severidade, versão atual e versão patcheada.
+3. Grafo `npm ls --json` por pacote vulnerável.
+4. Saída completa do `audit --json`.
+5. Conteúdo atual do `package.json`.
 
----
-
-## 📋 Como funciona o Workflow
-
-1. **Deteção:** Identifica o gerenciador (`pnpm`, `npm`, `yarn`) e mapeia o grafo de dependências em cache.
-2. **Consolidação:** Agrupa alertas por pacote e seleciona a maior versão segura da API.
-3. **Aplicação:** Cria a branch e aplica as correções (Bumps ou Overrides).
-4. **Validação Técnica:** Executa `npm run build` e `npm run test`.
-5. **Audit Final:** Executa `audit --audit-level low`. Se persistirem vulnerabilidades ou o build falhar, o PR é marcado com um aviso de **verificação manual**.
+Para triagem manual no chat do Cursor, use `@docs/verify-issues-dependabot.md`. A regra `.cursor/rules/security-automation.mdc` orienta o modelo sobre as políticas do repositório.
 
 ---
 
-## 📄 Licença
+## Como funciona o Workflow
+
+1. **Detecção:** Busca alertas `state=open` com ecossistema `npm` via `gh api`.
+2. **Contexto:** Coleta grafo e audit de todos os pacotes antes de invocar o agente.
+3. **Agente:** `Agent.prompt` (Cursor SDK, runtime local, `cwd` apontado para o repositório).
+4. **Aplicação:** O agente edita `package.json` e executa o install conforme a estratégia.
+5. **Commit:** Apenas se houver mudanças detectadas pelo `git diff`, cria o commit e faz push para `security/dependabot-remediation`.
+
+---
+
+## Licença
+
 Conforme o repositório pai.

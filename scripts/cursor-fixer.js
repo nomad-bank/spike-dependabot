@@ -1,29 +1,19 @@
 const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
-const semver = require('semver');
 
-/**
- * CONFIGURATIONS AND GLOBAL STATE
- */
 const UNIFIED_BRANCH = 'security/dependabot-remediation';
 let PKG_ROOT, REPO_ROOT, PACKAGE_MANAGER;
 
-/**
- * Executa comandos shell de forma síncrona utilizando o ambiente do processo.
- * @param {string} cmd - Comando principal.
- * @param {string[]} args - Argumentos do comando.
- * @param {object} options - Opções de execução (cwd, ignoreError).
- */
 function executeCommand(cmd, args = [], options = {}) {
   const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
   const env = { ...process.env, GH_TOKEN: token, ...options.env };
   try {
-    return execFileSync(cmd, args, { 
-      cwd: options.cwd || REPO_ROOT, 
-      env, 
+    return execFileSync(cmd, args, {
+      cwd: options.cwd || REPO_ROOT,
+      env,
       encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'] 
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch (error) {
     if (options.ignoreError) return error.stdout || '';
@@ -31,25 +21,17 @@ function executeCommand(cmd, args = [], options = {}) {
   }
 }
 
-/**
- * Define o diretório raiz do repositório e identifica o gerenciador de pacotes.
- */
 function prepareEnvironment() {
-  REPO_ROOT = process.env.GITHUB_WORKSPACE ? path.resolve(process.env.GITHUB_WORKSPACE) : findGitRoot(process.cwd());
-  const relativePkgPath = process.env.SECURITY_PACKAGE_ROOT || 'javascript';
+  REPO_ROOT = process.env.GITHUB_WORKSPACE
+    ? path.resolve(process.env.GITHUB_WORKSPACE)
+    : findGitRoot(process.cwd());
+  const relativePkgPath = process.env.SECURITY_PACKAGE_ROOT || '.';
   PKG_ROOT = path.resolve(REPO_ROOT, relativePkgPath);
 
-  if (fs.existsSync(path.join(PKG_ROOT, 'pnpm-lock.yaml'))) {
-    PACKAGE_MANAGER = 'pnpm';
-  } else {
-    PACKAGE_MANAGER = 'npm';
-  }
+  PACKAGE_MANAGER = fs.existsSync(path.join(PKG_ROOT, 'pnpm-lock.yaml')) ? 'pnpm' : 'npm';
   console.log(`Environment ready: [${PACKAGE_MANAGER.toUpperCase()}] in ${relativePkgPath}`);
 }
 
-/**
- * Localiza recursivamente a raiz do projeto Git.
- */
 function findGitRoot(startDir) {
   let current = startDir;
   while (current !== path.parse(current).root) {
@@ -59,74 +41,111 @@ function findGitRoot(startDir) {
   return current;
 }
 
-/**
- * Orquestra a estratégia de remediação utilizando o contexto do guia mestre e o token de IA.
- * @param {object} context - Dados do pacote, grafo e logs de audit.
- */
-async function orchestrateAiDecision(context) {
-  const token = process.env.CURSOR_TOKEN;
-  const masterGuidePath = path.join(REPO_ROOT, 'docs/verify-issues-dependabot.md');
-  
-  if (!fs.existsSync(masterGuidePath)) {
-    throw new Error("Master guide not found at docs/verify-issues-dependabot.md. Orchestration aborted.");
+function buildRemediationPrompt(alerts, graphMap) {
+  const guidePath = path.join(REPO_ROOT, 'docs/verify-issues-dependabot.md');
+  if (!fs.existsSync(guidePath)) {
+    throw new Error('Remediation guide not found at docs/verify-issues-dependabot.md');
   }
 
-  const masterPrompt = fs.readFileSync(masterGuidePath, 'utf8');
-  console.log(`Analyzing package for AI orchestration: ${context.pkgName}`);
+  const guide = fs.readFileSync(guidePath, 'utf8');
+  const packageJsonPath = path.join(PKG_ROOT, 'package.json');
+  const currentPackageJson = fs.readFileSync(packageJsonPath, 'utf8');
 
-  const aiInput = {
-    instructions: masterPrompt,
-    vulnerablePackage: context.pkgName,
-    targetVersion: context.patchVersion,
-    dependencyGraph: context.graph,
-    auditLogs: context.auditLog
-  };
+  const alertsSection = alerts
+    .map(({ pkg, severity, currentVersion, fixVersion, graph }) => {
+      return [
+        `### ${pkg}`,
+        `- Severity: ${severity}`,
+        `- Current version: ${currentVersion}`,
+        `- First patched version: ${fixVersion}`,
+        `- Dependency graph (npm ls):`,
+        '```json',
+        graph,
+        '```',
+      ].join('\n');
+    })
+    .join('\n\n');
 
-  /**
-   * Se CURSOR_TOKEN estiver presente, a decisão estratégica é delegada à orquestração do Agente.
-   * Caso contrário, o sistema utiliza o fallback baseado na profundidade do grafo.
-   */
-  if (token) {
-    // Implementação pendente para integração direta via API de Agent
-    return context.depth > 2 ? 'OVERRIDE' : 'BUMP';
-  }
+  const auditRaw = executeCommand(PACKAGE_MANAGER, ['audit', '--json'], {
+    cwd: PKG_ROOT,
+    ignoreError: true,
+  });
 
-  return context.depth > 2 ? 'OVERRIDE' : 'BUMP';
+  return [
+    guide,
+    '',
+    '---',
+    '',
+    '## Open Dependabot Alerts to Fix',
+    '',
+    alertsSection,
+    '',
+    '---',
+    '',
+    '## Current package.json',
+    '',
+    '```json',
+    currentPackageJson,
+    '```',
+    '',
+    '## Audit output',
+    '',
+    '```json',
+    auditRaw,
+    '```',
+    '',
+    '---',
+    '',
+    '## Your task',
+    '',
+    `Package manager: **${PACKAGE_MANAGER}**`,
+    `package.json path: \`${packageJsonPath}\``,
+    '',
+    'For each alert above, apply the appropriate remediation strategy as described in the guide:',
+    '1. Prefer a direct bump when the package is a direct dependency.',
+    '2. Use pnpm.overrides / overrides when the package is transitive.',
+    `3. After editing package.json, run \`${PACKAGE_MANAGER} install\` to apply changes.`,
+    '4. All versions must be exact (no ^ or ~ prefixes).',
+    '5. Do not remove or reorder any existing keys in package.json.',
+  ].join('\n');
 }
 
-/**
- * Modifica o manifest package.json para incluir resoluções forçadas.
- */
-function applyManualOverrides(packageName, version) {
-  const configPath = path.join(PKG_ROOT, 'package.json');
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+async function callCursorAgent(prompt) {
+  const { Agent, CursorAgentError } = await import('@cursor/sdk');
 
-  if (PACKAGE_MANAGER === 'pnpm') {
-    config.pnpm = config.pnpm || {};
-    config.pnpm.overrides = { ...config.pnpm.overrides, [packageName]: version };
-  } else {
-    config.overrides = { ...config.overrides, [packageName]: version };
+  const apiKey = process.env.CURSOR_TOKEN;
+  if (!apiKey) {
+    throw new Error('CURSOR_TOKEN environment variable is not set. Cannot invoke Cursor agent.');
   }
 
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
-}
+  console.log('Invoking Cursor agent for security remediation...');
 
-/**
- * Valida a integridade do projeto executando o script de build definido.
- */
-function verifyProjectHealth() {
-  console.log("Verifying project health (Build Check)...");
   try {
-    executeCommand(PACKAGE_MANAGER, ['run', 'build'], { cwd: PKG_ROOT });
-    return true;
-  } catch {
-    return false;
+    const result = await Agent.prompt(prompt, {
+      apiKey,
+      model: { id: 'composer-2' },
+      local: { cwd: REPO_ROOT },
+    });
+
+    if (result.status === 'error') {
+      throw new Error(`Cursor agent run failed (run id: ${result.id}). Check the Cursor dashboard for details.`);
+    }
+
+    console.log(`Cursor agent completed with status: ${result.status}`);
+  } catch (err) {
+    if (err instanceof CursorAgentError) {
+      const retryNote = err.isRetryable ? ' (retryable)' : ' (non-retryable)';
+      throw new Error(`Cursor agent failed to start${retryNote}: ${err.message}`);
+    }
+    throw err;
   }
 }
 
-/**
- * Fluxo principal de remediação automatizada.
- */
+function hasUncommittedChanges() {
+  const diff = executeCommand('git', ['diff', '--name-only'], { ignoreError: true });
+  return diff.trim().length > 0;
+}
+
 async function runRemediation() {
   prepareEnvironment();
 
@@ -135,72 +154,47 @@ async function runRemediation() {
   const npmAlerts = JSON.parse(rawAlerts).filter(a => a.dependency.package.ecosystem === 'npm');
 
   if (npmAlerts.length === 0) {
-    return console.log("No open vulnerabilities found. Task completed.");
+    return console.log('No open vulnerabilities found. Task completed.');
   }
 
+  console.log(`Found ${npmAlerts.length} open npm alert(s). Preparing context...`);
   executeCommand('git', ['checkout', '-B', UNIFIED_BRANCH]);
 
-  const results = [];
+  const alertContexts = npmAlerts
+    .filter(a => a.security_vulnerability?.first_patched_version?.identifier)
+    .map(alert => {
+      const pkg = alert.dependency.package.name;
+      const fixVersion = alert.security_vulnerability.first_patched_version.identifier;
+      const severity = alert.security_vulnerability.severity;
+      const graphRaw = executeCommand('npm', ['ls', pkg, '--json'], { cwd: PKG_ROOT, ignoreError: true });
+      const graphJson = JSON.parse(graphRaw || '{}');
+      const currentVersion = graphJson.dependencies?.[pkg]?.version ?? 'n/a';
 
-  for (const alert of npmAlerts) {
-    const pkg = alert.dependency.package.name;
-    const fixVersion = alert.security_vulnerability?.first_patched_version?.identifier;
-
-    if (!fixVersion) continue;
-
-    const graphRaw = executeCommand('npm', ['ls', pkg, '--json'], { cwd: PKG_ROOT, ignoreError: true });
-    const auditRaw = executeCommand(PACKAGE_MANAGER, ['audit', '--json'], { cwd: PKG_ROOT, ignoreError: true });
-    
-    const graphJson = JSON.parse(graphRaw || '{}');
-    const pkgInfo = graphJson.dependencies?.[pkg] || { version: 'n/a', depth: 1 };
-
-    const decision = await orchestrateAiDecision({
-      pkgName: pkg,
-      patchVersion: fixVersion,
-      graph: graphRaw,
-      auditLog: auditRaw,
-      depth: pkgInfo.depth
+      return { pkg, severity, currentVersion, fixVersion, graph: graphRaw };
     });
 
-    try {
-      let appliedStrategy = '';
-      if (decision === 'BUMP') {
-        appliedStrategy = 'Bump Direto (AI-Led)';
-        const addArgs = PACKAGE_MANAGER === 'pnpm' ? ['add', '-E'] : ['install', '--save-exact'];
-        executeCommand(PACKAGE_MANAGER, [...addArgs, `${pkg}@${fixVersion}`], { cwd: PKG_ROOT });
-      } else {
-        appliedStrategy = 'Manual Override (AI-Led)';
-        applyManualOverrides(pkg, fixVersion);
-        executeCommand(PACKAGE_MANAGER, ['install'], { cwd: PKG_ROOT });
-      }
-
-      const isHealthy = verifyProjectHealth();
-      results.push({ 
-        name: pkg, 
-        patch: fixVersion, 
-        strategy: appliedStrategy, 
-        depth: pkgInfo.depth, 
-        healthy: isHealthy, 
-        alerts: [alert], 
-        version: pkgInfo.version 
-      });
-
-    } catch (err) {
-      console.error(`Remediation error for package ${pkg}: ${err.message}`);
-    }
+  if (alertContexts.length === 0) {
+    return console.log('No alerts with available patches. Task completed.');
   }
 
-  if (results.length > 0) {
-    executeCommand('git', ['add', '.']);
-    executeCommand('git', ['commit', '-m', `security: remediation of ${results.length} vulnerabilities via AI Orchestration`], { ignoreError: true });
-    executeCommand('git', ['push', '-u', 'origin', 'HEAD', '--force']);
-    
-    console.log(`Orchestration completed. PR available on branch ${UNIFIED_BRANCH}`);
+  const prompt = buildRemediationPrompt(alertContexts);
+  await callCursorAgent(prompt);
+
+  if (!hasUncommittedChanges()) {
+    return console.log('Cursor agent completed but no file changes detected.');
   }
+
+  executeCommand('git', ['add', '.']);
+  executeCommand('git', ['commit', '-m', `security: remediate ${alertContexts.length} vulnerabilities via Cursor agent`], {
+    ignoreError: true,
+  });
+  executeCommand('git', ['push', '-u', 'origin', 'HEAD', '--force']);
+
+  console.log(`Remediation committed to branch ${UNIFIED_BRANCH}.`);
 }
 
 runRemediation().catch(err => {
-  console.error("Fatal error during orchestration:");
+  console.error('Fatal error during orchestration:');
   console.error(err);
   process.exit(1);
 });
