@@ -13,6 +13,7 @@ const {
   GITHUB_TOKEN,
   GH_DEPENDABOT_ALERTS_TOKEN,
   GITHUB_REPOSITORY,
+  GITHUB_DEFAULT_BRANCH = 'main',
   SEVERITY_FILTER = 'all',
   PACKAGE_MANAGER,
   NOMAD_ACTIONS_PATH,
@@ -145,7 +146,7 @@ async function main() {
       apiKey: CURSOR_API_KEY,
       model: { id: 'composer-2' },
       cloud: {
-        repos: [{ url: `https://github.com/${GITHUB_REPOSITORY}` }],
+        repos: [{ url: `https://github.com/${GITHUB_REPOSITORY}`, branch: GITHUB_DEFAULT_BRANCH }],
         autoCreatePR: true,
         skipReviewerRequest: true,
       },
