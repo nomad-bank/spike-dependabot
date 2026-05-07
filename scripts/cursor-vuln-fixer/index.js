@@ -146,7 +146,7 @@ async function main() {
       apiKey: CURSOR_API_KEY,
       model: { id: 'composer-2' },
       cloud: {
-        repos: [{ url: `https://github.com/${GITHUB_REPOSITORY}`, branch: GITHUB_DEFAULT_BRANCH }],
+        repos: [{ url: `https://github.com/${GITHUB_REPOSITORY}`, startingRef: GITHUB_DEFAULT_BRANCH }],
         autoCreatePR: true,
         skipReviewerRequest: true,
       },
