@@ -3,7 +3,30 @@ const fs = require('fs');
 const { execFileSync } = require('child_process');
 
 const UNIFIED_BRANCH = 'security/dependabot-remediation';
+const GITHUB_API_BASE = 'https://api.github.com';
+const GITHUB_API_VERSION = '2026-03-10';
 let PKG_ROOT, REPO_ROOT, PACKAGE_MANAGER;
+
+function buildGithubHeaders(token) {
+  return {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': GITHUB_API_VERSION,
+    'User-Agent': 'cursor-fixer',
+  };
+}
+
+async function githubRequestJson(url, token) {
+  const res = await fetch(url, { headers: buildGithubHeaders(token) });
+  const link = res.headers.get('link') || '';
+  const text = await res.text();
+  if (!text) return { ok: res.ok, status: res.status, text, json: null, link };
+  try {
+    return { ok: res.ok, status: res.status, text, json: JSON.parse(text), link };
+  } catch {
+    return { ok: res.ok, status: res.status, text, json: null, link };
+  }
+}
 
 function executeCommand(cmd, args = [], options = {}) {
   const baseToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
@@ -148,48 +171,58 @@ function hasUncommittedChanges() {
   return diff.trim().length > 0;
 }
 
+function extractAfterParamFromLinkHeader(linkHeader) {
+  if (!linkHeader) return null;
+  const parts = String(linkHeader)
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const next = parts.find(p => /;\s*rel="next"\s*$/.test(p));
+  if (!next) return null;
+
+  const match = next.match(/<([^>]+)>/);
+  if (!match) return null;
+
+  try {
+    const u = new URL(match[1]);
+    return u.searchParams.get('after');
+  } catch {
+    return null;
+  }
+}
+
 async function fetchOpenDependabotAlerts(repoSlug, token) {
-  const base = (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/$/, '');
   const aggregated = [];
-  let page = 1;
+  let afterParam = null;
 
   for (;;) {
-    const url = new URL(`${base}/repos/${repoSlug}/dependabot/alerts`);
+    const url = new URL(`${GITHUB_API_BASE}/repos/${repoSlug}/dependabot/alerts`);
     url.searchParams.set('state', 'open');
     url.searchParams.set('per_page', '100');
-    url.searchParams.set('page', String(page));
+    if (afterParam) url.searchParams.set('after', afterParam);
 
-    const res = await fetch(url, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-        'User-Agent': 'cursor-fixer',
-      },
-    });
-
-    const text = await res.text();
-    if (!res.ok) {
+    const { ok, status, text, json, link } = await githubRequestJson(url, token);
+    if (!ok) {
       let detail = text.slice(0, 500);
-      try {
-        const body = JSON.parse(text);
-        if (body.message) {
-          detail = body.message;
-          if (body.documentation_url) detail += ` ${body.documentation_url}`;
-        }
-      } catch {
-        /* keep detail */
+      if (json && typeof json === 'object' && json.message) {
+        detail = String(json.message);
+        if (json.documentation_url) detail += ` ${json.documentation_url}`;
       }
-      throw new Error(
-        `Dependabot alerts API HTTP ${res.status}: ${detail}. PAT classic em repo privado: scope security_events; fine-grained: Dependabot alerts Read + SSO na org.`,
-      );
+      if (status === 401 || status === 403) {
+        throw new Error(
+          `Dependabot alerts API HTTP ${status}: ${detail}. Check token permissions (PAT classic: repo or security_events; fine-grained: Dependabot alerts Read; org SSO if applicable).`,
+        );
+      }
+      throw new Error(`Dependabot alerts API HTTP ${status}: ${detail}.`);
     }
 
-    const chunk = JSON.parse(text);
+    const chunk = json;
     if (!Array.isArray(chunk) || chunk.length === 0) break;
     aggregated.push(...chunk);
-    if (chunk.length < 100) break;
-    page += 1;
+    const nextAfter = extractAfterParamFromLinkHeader(link);
+    if (!nextAfter) break;
+    afterParam = nextAfter;
   }
 
   return aggregated;
