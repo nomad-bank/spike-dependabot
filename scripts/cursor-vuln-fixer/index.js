@@ -17,10 +17,12 @@ const {
   GITHUB_REPOSITORY,
   GITHUB_WORKSPACE,
   GITHUB_OUTPUT,
-  SEVERITY_FILTER = 'all',
+  SEVERITY_FILTER: SEVERITY_FILTER_RAW,
   PACKAGE_MANAGER,
   NOMAD_ACTIONS_PATH,
 } = process.env;
+
+const SEVERITY_FILTER = (SEVERITY_FILTER_RAW ?? 'all').trim() || 'all';
 
 const dependabotToken = GH_DEPENDABOT_ALERTS_TOKEN ?? GITHUB_TOKEN;
 
@@ -62,7 +64,9 @@ async function fetchDependabotAlerts() {
   for (;;) {
     const url = new URL(`${GITHUB_API_BASE}/repos/${owner}/${repo}/dependabot/alerts`);
     url.searchParams.set('state', 'open');
-    url.searchParams.set('severity', severities.join(','));
+    if (SEVERITY_FILTER !== 'all' && severities.length > 0) {
+      url.searchParams.set('severity', severities.join(','));
+    }
     url.searchParams.set('per_page', '100');
     if (afterParam) url.searchParams.set('after', afterParam);
 
@@ -94,9 +98,26 @@ async function fetchDependabotAlerts() {
   return aggregated;
 }
 
+function normalizeEcosystem(raw) {
+  return String(raw ?? '').trim().toLowerCase();
+}
+
+function detectPackageManager(repoCwd) {
+  if (existsSync(join(repoCwd, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (existsSync(join(repoCwd, 'yarn.lock'))) return 'yarn';
+  return 'npm';
+}
+
+function graphInspectCommand(repoCwd, pm) {
+  const yarnBerry = existsSync(join(repoCwd, '.yarnrc.yml'));
+  if (pm === 'pnpm') return '`pnpm why <pacote>` (monorepo: `pnpm why -r <pacote>` ou a partir da pasta do pacote)';
+  if (pm === 'yarn') return yarnBerry ? '`yarn npm why <pacote>`' : '`yarn why <pacote>`';
+  return '`npm ls <pacote> --all`';
+}
+
 function formatAlerts(alerts) {
   return alerts
-    .filter((a) => a.dependency?.package?.ecosystem === 'npm')
+    .filter((a) => normalizeEcosystem(a.dependency?.package?.ecosystem) === 'npm')
     .map((a) => {
       const manifestPath = a.dependency.manifest_path || 'package.json';
       return {
@@ -126,7 +147,8 @@ function runAudit(repoCwd, packageManager) {
   }
 }
 
-function buildPrompt(formattedAlerts, guideDoc, auditJson) {
+function buildPrompt(formattedAlerts, guideDoc, auditJson, repoCwd, packageManager) {
+  const graphCmd = graphInspectCommand(repoCwd, packageManager);
   const alertLines = formattedAlerts
     .map(({ alertNumber, pkg, ecosystem, severity, summary, fixedIn, cve, manifestPath }) =>
       `- [#${alertNumber}] \`${pkg}\` (${ecosystem}) [${severity.toUpperCase()}] — ${summary} — corrigir em \`${fixedIn}\` — ${cve ?? 'sem CVE'} — manifest Dependabot: \`${manifestPath}\``,
@@ -137,11 +159,12 @@ function buildPrompt(formattedAlerts, guideDoc, auditJson) {
 
 ---
 
-## Contexto: alertas Dependabot (npm)
+## Contexto: alertas Dependabot (pacotes do registry npm)
 
-Gerenciador detectado: **${PACKAGE_MANAGER}**
+Na API do GitHub, **npm, Yarn e pnpm** usam o mesmo valor \`ecosystem: npm\` para dependências do registry npm. O cliente detectado neste run (**${packageManager}**) define qual CLI usar (\`install\`, \`audit\`, grafo).
+
 Repositório: **${owner}/${repo}**
-Total de alertas npm: **${formattedAlerts.length}**
+Total de alertas deste ecossistema: **${formattedAlerts.length}**
 
 ${alertLines}
 
@@ -149,7 +172,7 @@ ${alertLines}
 
 ## Saída do audit (fonte primária para identificar os manifests corretos)
 
-O audit abaixo reflete o estado real das dependências instaladas neste checkout. **Use-o como fonte primária** para identificar em qual \`package.json\` aplicar cada correção — o campo \`manifest_path\` do Dependabot acima é apenas referência secundária.
+O audit abaixo reflete o estado real das dependências instaladas neste checkout conforme **${packageManager}**. **Use-o como fonte primária** para identificar em qual \`package.json\` aplicar cada correção — o campo \`manifest_path\` do Dependabot acima é referência secundária.
 
 \`\`\`json
 ${auditJson}
@@ -159,14 +182,14 @@ ${auditJson}
 
 ## Sua tarefa
 
-1. Analise o audit para localizar o(s) \`package.json\` onde cada pacote vulnerável é declarado.
-2. Se necessário, rode \`${PACKAGE_MANAGER} why <pacote>\` para entender o grafo antes de editar.
-3. Aplique a estratégia do guia (bump direto → bump do pai → override/resolution) **no manifest correto**.
-4. Execute \`${PACKAGE_MANAGER} install\` na raiz do workspace após as edições.
+1. Analise o audit para localizar o(s) \`package.json\` onde cada pacote vulnerável entra no grafo.
+2. Se precisar do caminho de dependências, use ${graphCmd}.
+3. Aplique a estratégia do guia (bump direto → bump do pai → override ou \`resolutions\`) **no manifest correto** para este gerenciador (**${packageManager}**).
+4. Execute \`${packageManager} install\` na raiz do workspace após as edições.
 `;
 }
 
-function buildPrBody(formattedAlerts) {
+function buildPrBody(formattedAlerts, packageManager) {
   const severityOrder = { critical: 0, high: 1, moderate: 2, low: 3 };
   const sorted = [...formattedAlerts].sort(
     (a, b) => (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9),
@@ -180,7 +203,7 @@ function buildPrBody(formattedAlerts) {
 
   return `## Remediação automática de vulnerabilidades Dependabot
 
-Agente Cursor aplicou correções para **${formattedAlerts.length} alerta(s)** (filtro: \`${SEVERITY_FILTER}\`) em \`${PACKAGE_MANAGER}\`.
+Agente Cursor aplicou correções para **${formattedAlerts.length} alerta(s)** (filtro: \`${SEVERITY_FILTER}\`) com gerenciador **${packageManager}** (pacotes registry npm / compatível npm · pnpm · yarn).
 
 ### Alertas resolvidos
 
@@ -205,32 +228,38 @@ async function main() {
   const alerts = await fetchDependabotAlerts();
   const formattedAlerts = formatAlerts(alerts);
 
+  const ecosystemsInApi = [...new Set(alerts.map((a) => a.dependency?.package?.ecosystem).filter(Boolean))];
+  console.log(
+    `API Dependabot: ${alerts.length} alerta(s) aberto(s); após filtro registry npm (npm/pnpm/yarn): ${formattedAlerts.length}. Ecossistemas na resposta: ${ecosystemsInApi.length ? ecosystemsInApi.join(', ') : '(nenhum ou estrutura inesperada)'}`,
+  );
+
   if (formattedAlerts.length === 0) {
     console.log(
-      'Nenhum alerta Dependabot npm aberto para o filtro de severidade selecionado (ou só ecossistemas não-npm). Nada a fazer.',
+      'Nenhum alerta do registry npm para processar. Outros ecossistemas (Actions, Docker, Maven, Rubygems, etc.) não são cobertos por este fluxo.',
     );
     if (GITHUB_OUTPUT) writeFileSync(GITHUB_OUTPUT, 'has_alerts=false\n', { flag: 'a' });
     process.exit(0);
   }
 
   if (GITHUB_OUTPUT) writeFileSync(GITHUB_OUTPUT, 'has_alerts=true\n', { flag: 'a' });
-  console.log(`${formattedAlerts.length} alerta(s) npm encontrado(s). Acionando agente Cursor...`);
+  console.log(`${formattedAlerts.length} alerta(s) do registry npm encontrado(s). Acionando agente Cursor...`);
 
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const nomadActionsPath = NOMAD_ACTIONS_PATH ?? join(scriptDir, '../..');
   const repoCwd = GITHUB_WORKSPACE ?? process.cwd();
+  const packageManager = (PACKAGE_MANAGER ?? '').trim() || detectPackageManager(repoCwd);
   const guideDoc = readFileSync(
     join(nomadActionsPath, 'docs/cursor-vulnerability-fixer.md'),
     'utf8',
   );
 
   const prBodyPath = join(repoCwd, 'pr-body.md');
-  writeFileSync(prBodyPath, buildPrBody(formattedAlerts), 'utf8');
+  writeFileSync(prBodyPath, buildPrBody(formattedAlerts, packageManager), 'utf8');
 
-  console.log('Rodando audit local para mapear grafo de dependências...');
-  const auditJson = runAudit(repoCwd, PACKAGE_MANAGER);
+  console.log(`Rodando audit local (${packageManager}) para mapear o grafo...`);
+  const auditJson = runAudit(repoCwd, packageManager);
 
-  const prompt = buildPrompt(formattedAlerts, guideDoc, auditJson);
+  const prompt = buildPrompt(formattedAlerts, guideDoc, auditJson, repoCwd, packageManager);
 
   try {
     const result = await Agent.prompt(prompt, {

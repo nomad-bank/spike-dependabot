@@ -2,7 +2,7 @@
 
 > Remediação proativa de vulnerabilidades com PR único via Cursor Agent (SDK) em CI.
 
-O workflow lê alertas Dependabot (REST, paginação por cursor), monta o prompt com o guia `docs/cursor-vulnerability-fixer.md`, conteúdo dos **manifests afetados** (`manifest_path` por alerta) e aciona o agente em **runtime local** no checkout do Actions. Depois: `audit`, commit na branch `security/dependabot-remediation` e PR com corpo gerado (`pr-body.md`).
+O workflow lê alertas Dependabot (REST, paginação por cursor). Na API do GitHub, **npm, Yarn e pnpm** aparecem como `ecosystem: npm` para pacotes do registry. O script detecta o cliente pelo lockfile (`pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn, senão npm) ou pela env `PACKAGE_MANAGER`, injeta saída de **`pnpm|npm|yarn audit --json`** no prompt e aciona o agente em **runtime local**. Depois: audit no CI, commit na branch `security/dependabot-remediation` e PR (`pr-body.md`).
 
 ---
 
@@ -13,8 +13,8 @@ cursor-vulnerability-fixer.yml  (cron diário / workflow_dispatch / workflow_cal
   ├─ checkout + branch security/dependabot-remediation
   ├─ scripts/cursor-vuln-fixer/index.js
   │    ├─ API Dependabot (GH_DEPENDABOT_ALERTS_TOKEN) + paginação Link/after
-  │    ├─ filtro npm + agrupamento por manifest_path + snapshot dos package.json
-  │    └─ Agent.prompt · local cwd · modelo cursor-auto
+  │    ├─ filtro ecosystem npm (registry; vale para npm, pnpm e yarn) + audit JSON no prompt
+  │    └─ Agent.prompt · local cwd
   ├─ pnpm|npm|yarn audit (se houver alertas)
   ├─ commit + push
   └─ gh pr create / gh pr edit (--body-file pr-body.md)
