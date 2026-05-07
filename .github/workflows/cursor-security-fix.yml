@@ -24,7 +24,7 @@ jobs:
       - name: Validate required secrets
         run: |
           if [ -z "${{ secrets.GH_DEPENDABOT_ALERTS_TOKEN }}" ]; then
-            echo "::error::GH_DEPENDABOT_ALERTS_TOKEN is not set. PAT com leitura de Dependabot alerts (classic: scope security_events ou repo; fine-grained: Dependabot alerts Read). Na org com SAML, autorize o token em Settings → Tokens → Configure SSO."
+            echo "::error::GH_DEPENDABOT_ALERTS_TOKEN is not set. Repo privado: PAT classic com scope security_events (admin:repo_hook NÃO substitui); fine-grained: Dependabot alerts Read. Org SAML: Configure SSO no token."
             exit 1
           fi
           if [ -z "${{ secrets.CURSOR_TOKEN }}" ]; then

@@ -148,6 +148,53 @@ function hasUncommittedChanges() {
   return diff.trim().length > 0;
 }
 
+async function fetchOpenDependabotAlerts(repoSlug, token) {
+  const base = (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/$/, '');
+  const aggregated = [];
+  let page = 1;
+
+  for (;;) {
+    const url = new URL(`${base}/repos/${repoSlug}/dependabot/alerts`);
+    url.searchParams.set('state', 'open');
+    url.searchParams.set('per_page', '100');
+    url.searchParams.set('page', String(page));
+
+    const res = await fetch(url, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${token}`,
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'cursor-fixer',
+      },
+    });
+
+    const text = await res.text();
+    if (!res.ok) {
+      let detail = text.slice(0, 500);
+      try {
+        const body = JSON.parse(text);
+        if (body.message) {
+          detail = body.message;
+          if (body.documentation_url) detail += ` ${body.documentation_url}`;
+        }
+      } catch {
+        /* keep detail */
+      }
+      throw new Error(
+        `Dependabot alerts API HTTP ${res.status}: ${detail}. PAT classic em repo privado: scope security_events; fine-grained: Dependabot alerts Read + SSO na org.`,
+      );
+    }
+
+    const chunk = JSON.parse(text);
+    if (!Array.isArray(chunk) || chunk.length === 0) break;
+    aggregated.push(...chunk);
+    if (chunk.length < 100) break;
+    page += 1;
+  }
+
+  return aggregated;
+}
+
 async function runRemediation() {
   prepareEnvironment();
 
@@ -157,10 +204,12 @@ async function runRemediation() {
   ).trim();
   const alertsToken =
     process.env.GH_DEPENDABOT_ALERTS_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
-  const rawAlerts = executeCommand('gh', ['api', `/repos/${repoSlug}/dependabot/alerts?state=open`], {
-    ghToken: alertsToken,
-  });
-  const npmAlerts = JSON.parse(rawAlerts).filter(a => a.dependency.package.ecosystem === 'npm');
+  if (!alertsToken) {
+    throw new Error('No token for Dependabot alerts (GH_DEPENDABOT_ALERTS_TOKEN or GH_TOKEN).');
+  }
+
+  const alerts = await fetchOpenDependabotAlerts(repoSlug, alertsToken);
+  const npmAlerts = alerts.filter(a => a.dependency.package.ecosystem === 'npm');
 
   if (npmAlerts.length === 0) {
     return console.log('No open vulnerabilities found. Task completed.');
