@@ -5,8 +5,8 @@ alwaysApply: true
 
 # Dependabot e audit
 
-Leia o [`README.md`](../../README.md): automação com **um PR** (branch `security/dependabot-remediation`), `SECURITY_PACKAGE_ROOT`, gerenciador detectado no CI, severidades Critical→Low e overrides condicionais.
+Leia o [`README.md`](../../README.md): workflow reutilizável (`workflow_call`) em `cursor-vulnerability-fixer.yml`, script em `scripts/cursor-vuln-fixer/index.js`, cloud runtime, PR único na branch `security/dependabot-remediation`, gerenciador detectado automaticamente, filtro de severidade via input `severity-filter` (`all` ou `critical-high`).
 
 Para o fluxo manual («Verify issues»): use **`@docs/cursor-vulnerability-fixer.md`** ([`docs/cursor-vulnerability-fixer.md`](../../docs/cursor-vulnerability-fixer.md)) — audit só roda **no terminal do usuário**, Step 0 (`pnpm why` ou `npm ls` / `yarn why`), bump com **versão fixa** (`pnpm add -E`, `npm install --save-exact`, `yarn add --exact`), escopo workspace vs raiz, Step 6 de overrides.
 
-Não corrigir moderate/low além de listar; Critical/High são o escopo.
+Escopo padrão: Critical e High. Moderate/Low incluídos apenas quando `severity-filter: all` for configurado explicitamente.

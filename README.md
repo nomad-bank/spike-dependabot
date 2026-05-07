@@ -1,97 +1,90 @@
-# Security Fixer Automation
+# Cursor Vulnerability Fixer
 
 > Remediação proativa de vulnerabilidades com Self-Healing PRs via Cursor Agent.
 
-Este repositório implementa um modelo **Automated-Proactive** de remediação de segurança. O fluxo lê os alertas abertos do Dependabot, passa o contexto completo para um agente Cursor via SDK e deixa a IA aplicar as correções diretamente — bump direto ou override, conforme a análise do grafo — consolidando tudo em um único PR.
+Workflow reutilizável (`workflow_call`) que lê os alertas abertos do Dependabot, passa o contexto completo para um agente Cursor via SDK e deixa a IA aplicar as correções — bump direto ou override conforme o grafo — abrindo um único PR consolidado.
 
 ---
 
 ## Fluxo
 
 ```
-GitHub Actions (schedule / dispatch)
-  └─ cursor-fixer.js
-       ├─ gh api → lê alertas Dependabot abertos (npm)
-       ├─ npm ls → grafo por pacote
-       ├─ <package-manager> audit → log completo
-       ├─ buildRemediationPrompt()
-       │    └─ docs/verify-issues-dependabot.md + alertas + package.json atual
-       ├─ callCursorAgent()  ← @cursor/sdk · Agent.prompt · local runtime
-       │    └─ Agente edita package.json e roda install
-       └─ git commit + push → branch security/dependabot-remediation
+Caller workflow (schedule / dispatch)
+  └─ cursor-vulnerability-fixer.yml  (workflow_call)
+       ├─ Checkout do repositório alvo
+       ├─ Checkout nomad-actions (scripts + docs)
+       ├─ Detecta gerenciador de pacotes (package-manager.cjs)
+       ├─ scripts/cursor-vuln-fixer/index.js
+       │    ├─ GitHub API → alertas Dependabot abertos filtrados por severidade
+       │    ├─ buildPrompt()
+       │    │    └─ docs/cursor-vulnerability-fixer.md + alertas + gerenciador
+       │    └─ Agent.prompt()  ← @cursor/sdk · cloud runtime · autoCreatePR
+       └─ PR aberto automaticamente pelo agente na branch security/dependabot-remediation
 ```
 
 ---
 
 ## O que este projeto resolve
 
-- **Análise real por IA:** O Cursor Agent recebe o guia de remediação (`docs/verify-issues-dependabot.md`), o grafo de dependências e o audit log completo, e decide a estratégia mais adequada para cada pacote.
-- **Consolidação em um PR:** Todos os alertas são tratados numa única branch fixa (`security/dependabot-remediation`), eliminando o ruído de PRs individuais do Dependabot.
-- **Versões exatas:** O agente é instruído a nunca usar `^` ou `~` — todas as versões são fixas por política do repositório.
-- **Multi-gerenciador:** Detecção automática de `pnpm` (lockfile `pnpm-lock.yaml`) ou `npm`.
+- **Análise real por IA:** O Cursor Agent recebe o guia de remediação (`docs/cursor-vulnerability-fixer.md`), a lista de alertas com severidade e versão patcheada, e decide a estratégia mais adequada por pacote.
+- **Consolidação em um PR:** Todos os alertas são tratados numa única branch, eliminando o ruído de PRs individuais do Dependabot.
+- **Versões exatas:** O agente é instruído a nunca usar `^` ou `~` — todas as versões são fixas por política.
+- **Multi-gerenciador:** Detecção automática de `pnpm`, `npm` ou `yarn` via lockfile.
+- **Filtro de severidade:** Parâmetro `severity-filter` controla quais alertas processar (`all` ou `critical-high`).
 
 ---
 
 ## Estratégia de remediação
 
-O guia completo está em [`docs/verify-issues-dependabot.md`](docs/verify-issues-dependabot.md). Em resumo:
+O guia completo está em [`docs/cursor-vulnerability-fixer.md`](docs/cursor-vulnerability-fixer.md). Em resumo:
 
 | Cenário | Ação |
 | :--- | :--- |
 | Dependência direta | Bump com versão fixa (`add --save-exact`) |
-| Transitiva rasa | Bump do pacote pai ou pin na raiz |
-| Transitiva profunda / conflito de major | `pnpm.overrides` / `overrides` com versão exata |
+| Transitiva rasa | Bump do pacote pai |
+| Transitiva profunda / conflito de major | `pnpm.overrides` / `overrides` / `resolutions` com versão exata |
 
 ---
 
 ## Configuração e Setup
 
-### 1. Personal Access Token (PAT)
-
-Configure um **Fine-grained PAT** com as seguintes permissões:
-
-- `Dependabot alerts`: Read-only
-- `Contents`: Write
-- `Pull requests`: Write
-
-### 2. Secrets do repositório
-
-No GitHub, vá em *Settings > Secrets and variables > Actions*:
+### 1. Secrets obrigatórios
 
 | Secret | Descrição |
 | :--- | :--- |
-| `GH_DEPENDABOT_ALERTS_TOKEN` | PAT com acesso aos alertas Dependabot (obrigatório). |
-| `CURSOR_TOKEN` | API key do Cursor (`cursor_...`), obtida em [cursor.com/dashboard/cloud-agents](https://cursor.com/dashboard/cloud-agents). |
+| `CURSOR_TOKEN` | API key do Cursor, obtida em [cursor.com/dashboard/cloud-agents](https://cursor.com/dashboard/cloud-agents). |
+| `SRE_SCRIPTS` | PAT com acesso ao repositório `nomad-bank/nomad-actions` (checkout dos scripts). |
 
-### 3. Variável de repositório (opcional)
+### 2. Inputs do workflow
 
-| Variável | Descrição | Default |
+| Input | Descrição | Default |
 | :--- | :--- | :--- |
-| `SECURITY_PACKAGE_ROOT` | Caminho relativo ao `package.json` alvo. | `.` |
+| `severity-filter` | `"all"` (CRITICAL, HIGH, MODERATE, LOW) ou `"critical-high"` | `all` |
+| `package-manager` | `npm`, `yarn` ou `pnpm`. Detectado automaticamente se omitido. | — |
+| `runner` | Runner a utilizar. | `ubuntu-latest` |
 
----
+### 3. Permissões necessárias no repositório alvo
 
-## Integração com Cursor AI
+- `security-events: read` — leitura dos alertas Dependabot
+- `contents: read` — checkout do código
 
-O agente recebe o contexto montado por `buildRemediationPrompt()`:
-
-1. Conteúdo completo de `docs/verify-issues-dependabot.md` como guia de decisão.
-2. Lista de alertas abertos com severidade, versão atual e versão patcheada.
-3. Grafo `npm ls --json` por pacote vulnerável.
-4. Saída completa do `audit --json`.
-5. Conteúdo atual do `package.json`.
-
-Para triagem manual no chat do Cursor, use `@docs/verify-issues-dependabot.md`. A regra `.cursor/rules/security-automation.mdc` orienta o modelo sobre as políticas do repositório.
+O PR é criado pelo agente Cursor via cloud runtime com as permissões do `CURSOR_TOKEN`.
 
 ---
 
 ## Como funciona o Workflow
 
-1. **Detecção:** Busca alertas `state=open` com ecossistema `npm` via `gh api`.
-2. **Contexto:** Coleta grafo e audit de todos os pacotes antes de invocar o agente.
-3. **Agente:** `Agent.prompt` (Cursor SDK, runtime local, `cwd` apontado para o repositório).
-4. **Aplicação:** O agente edita `package.json` e executa o install conforme a estratégia.
-5. **Commit:** Apenas se houver mudanças detectadas pelo `git diff`, cria o commit e faz push para `security/dependabot-remediation`.
+1. **Detecção:** Busca alertas `state=open` paginados via GitHub API (cursor-based, `Link` header).
+2. **Filtro:** Aplica `severity-filter`; encerra sem erro se não houver alertas no filtro.
+3. **Prompt:** Monta contexto com o guia de remediação, lista de alertas e gerenciador detectado.
+4. **Agente:** `Agent.prompt` (Cursor SDK, cloud runtime) edita `package.json`, executa install e abre PR.
+5. **PR:** Consolidado na branch `security/dependabot-remediation` com descrição gerada pelo agente.
+
+---
+
+## Triagem manual no Cursor
+
+Para análise manual no chat, use `@docs/cursor-vulnerability-fixer.md`. A regra `.cursor/rules/security-automation.mdc` orienta o modelo sobre as políticas do repositório.
 
 ---
 
