@@ -9,13 +9,16 @@ const SEVERITY_MAP = {
 };
 
 const {
-  CURSOR_TOKEN,
+  CURSOR_API_KEY,
   GITHUB_TOKEN,
+  GH_DEPENDABOT_ALERTS_TOKEN,
   GITHUB_REPOSITORY,
   SEVERITY_FILTER = 'all',
   PACKAGE_MANAGER,
   NOMAD_ACTIONS_PATH,
 } = process.env;
+
+const dependabotToken = GH_DEPENDABOT_ALERTS_TOKEN ?? GITHUB_TOKEN;
 
 const GITHUB_API_BASE = 'https://api.github.com';
 const GITHUB_API_VERSION = '2026-03-10';
@@ -59,7 +62,7 @@ async function fetchDependabotAlerts() {
     url.searchParams.set('per_page', '100');
     if (afterParam) url.searchParams.set('after', afterParam);
 
-    const response = await fetch(url, { headers: buildGithubHeaders(GITHUB_TOKEN) });
+    const response = await fetch(url, { headers: buildGithubHeaders(dependabotToken) });
     const text = await response.text();
     const json = text ? JSON.parse(text) : null;
 
@@ -139,7 +142,7 @@ async function main() {
 
   try {
     const result = await Agent.prompt(prompt, {
-      apiKey: CURSOR_TOKEN,
+      apiKey: CURSOR_API_KEY,
       model: { id: 'composer-2' },
       cloud: {
         repos: [{ url: `https://github.com/${GITHUB_REPOSITORY}` }],
