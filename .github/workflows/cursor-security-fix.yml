@@ -16,6 +16,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      security-events: read
 
     env:
       SECURITY_PACKAGE_ROOT: ${{ github.event.inputs.package_root || vars.SECURITY_PACKAGE_ROOT || '.' }}
@@ -23,10 +24,6 @@ jobs:
     steps:
       - name: Validate required secrets
         run: |
-          if [ -z "${{ secrets.GH_DEPENDABOT_ALERTS_TOKEN }}" ]; then
-            echo "::error::GH_DEPENDABOT_ALERTS_TOKEN is not set. A fine-grained PAT with 'Dependabot alerts: Read' and 'Contents: Write' is required."
-            exit 1
-          fi
           if [ -z "${{ secrets.CURSOR_TOKEN }}" ]; then
             echo "::error::CURSOR_TOKEN is not set. An API key from cursor.com/dashboard/cloud-agents is required."
             exit 1
@@ -69,7 +66,7 @@ jobs:
 
       - name: Execute Cursor Fix Logic
         env:
-          GH_TOKEN: ${{ secrets.GH_DEPENDABOT_ALERTS_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           CURSOR_TOKEN: ${{ secrets.CURSOR_TOKEN }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
         run: node "${SECURITY_PACKAGE_ROOT}/scripts/cursor-fixer.js"
