@@ -41,8 +41,8 @@ function extractAfterParamFromLinkHeader(linkHeader) {
   if (!linkHeader) return null;
   const next = String(linkHeader)
     .split(',')
-    .map(s => s.trim())
-    .find(p => /;\s*rel="next"\s*$/.test(p));
+    .map((s) => s.trim())
+    .find((p) => /;\s*rel="next"\s*$/.test(p));
   if (!next) return null;
   const match = next.match(/<([^>]+)>/);
   if (!match) return null;
@@ -93,49 +93,122 @@ async function fetchDependabotAlerts() {
 }
 
 function formatAlerts(alerts) {
-  return alerts.map((a) => ({
-    pkg: a.dependency.package.name,
-    ecosystem: a.dependency.package.ecosystem,
-    severity: a.security_advisory.severity,
-    summary: a.security_advisory.summary,
-    fixedIn: a.security_vulnerability?.first_patched_version?.identifier ?? 'sem patch disponível',
-    manifestPath: a.dependency.manifest_path,
-    cve: a.security_advisory.cve_id ?? a.security_advisory.ghsa_id,
-    alertNumber: a.number,
-  }));
+  return alerts
+    .filter((a) => a.dependency?.package?.ecosystem === 'npm')
+    .map((a) => {
+      const manifestPath = a.dependency.manifest_path || 'package.json';
+      return {
+        pkg: a.dependency.package.name,
+        ecosystem: a.dependency.package.ecosystem,
+        severity: a.security_advisory.severity,
+        summary: a.security_advisory.summary,
+        fixedIn: a.security_vulnerability?.first_patched_version?.identifier ?? 'sem patch disponível',
+        manifestPath,
+        cve: a.security_advisory.cve_id ?? a.security_advisory.ghsa_id,
+        alertNumber: a.number,
+      };
+    });
 }
 
-function buildPrompt(formattedAlerts, guideDoc) {
-  const alertLines = formattedAlerts
-    .map(({ pkg, ecosystem, severity, summary, fixedIn, manifestPath }) =>
-      `- ${pkg} (${ecosystem}) [${severity.toUpperCase()}] — ${summary}. Corrigido em: ${fixedIn}. Manifest: ${manifestPath}`
-    )
-    .join('\n');
+function groupAlertsByManifest(formattedAlerts) {
+  const byManifest = new Map();
+  for (const row of formattedAlerts) {
+    const key = row.manifestPath;
+    if (!byManifest.has(key)) byManifest.set(key, []);
+    byManifest.get(key).push(row);
+  }
+  return byManifest;
+}
+
+function readManifestsBlock(repoCwd, manifestPaths) {
+  const blocks = [];
+  for (const rel of manifestPaths) {
+    const full = join(repoCwd, rel);
+    try {
+      const content = readFileSync(full, 'utf8');
+      blocks.push(`### \`${rel}\`
+
+\`\`\`json
+${content}
+\`\`\``);
+    } catch {
+      blocks.push(`### \`${rel}\`
+
+(arquivo inexistente neste checkout — valide o caminho ou crie o manifest se for workspace novo)`);
+    }
+  }
+  return blocks.join('\n\n');
+}
+
+function buildPrompt(formattedAlerts, guideDoc, repoCwd) {
+  const byManifest = groupAlertsByManifest(formattedAlerts);
+  const orderedPaths = [...byManifest.keys()].sort();
+
+  const groupedLines = orderedPaths
+    .map((manifestPath) => {
+      const rows = byManifest.get(manifestPath);
+      const lines = rows
+        .map(
+          ({ alertNumber, pkg, ecosystem, severity, summary, fixedIn, cve }) =>
+            `  - [#${alertNumber}] \`${pkg}\` (${ecosystem}) [${severity.toUpperCase()}] — ${summary} — corrigir em \`${fixedIn}\` — ${cve ?? 'sem CVE'}`,
+        )
+        .join('\n');
+      return `#### \`${manifestPath}\`\n\n${lines}`;
+    })
+    .join('\n\n');
+
+  const manifestsBlock = readManifestsBlock(repoCwd, orderedPaths);
 
   return `${guideDoc}
 
 ---
 
-## Contexto: alertas Dependabot abertos neste repositório
+## Regra absoluta: manifest do alerta
 
-Gerenciador de pacotes: **${PACKAGE_MANAGER}**
+Cada alerta do GitHub API inclui \`dependency.manifest_path\` — é o **package.json (ou caminho de manifest) onde a dependência vulnerável foi detectada**. Você **deve** aplicar bump direto, bump de pai ou override **no contexto desse manifest e da árvore de workspace descrita pelo lockfile**, e **não** desviar tudo para o \`package.json\` da raiz do repositório.
+
+- Se o alerta está em \`apps/foo/package.json\`, a correção primária é nesse arquivo (ou no pacote-pai do workspace que declara a dependência de acordo com o guia), **não** no \`package.json\` raiz, salvo se a única forma suportada pelo gerenciador for \`overrides\` / \`pnpm.overrides\` na raiz (documente isso no commit).
+- Depois de editar, rode **um** \`${PACKAGE_MANAGER} install\` a partir do **diretório raiz do repositório** (ou do root do workspace indicado pelo lockfile), para que o lockfile global reflita as mudanças.
+- Não altere dependências, scripts ou formatação fora do necessário para corrigir os alertas listados.
+
+---
+
+## Contexto: alertas Dependabot (npm)
+
+Gerenciador detectado: **${PACKAGE_MANAGER}**
 Repositório: **${owner}/${repo}**
 
-Alertas a corrigir (${formattedAlerts.length} no total):
-${alertLines}
+Total de alertas npm: **${formattedAlerts.length}**
 
-Aplique a estratégia de remediação do guia acima para corrigir todos os alertas listados. Siga a árvore de decisão em ordem (bump direto → bump do pai → override/resolution). Após aplicar as alterações, execute \`${PACKAGE_MANAGER} install\` para garantir que o lockfile está consistente. Não altere scripts, dependências não relacionadas ou formatação fora das entradas modificadas.`;
+### Por arquivo de manifest (origem Dependabot)
+
+${groupedLines}
+
+---
+
+## Conteúdo atual dos manifests envolvidos
+
+${manifestsBlock}
+
+---
+
+## Sua tarefa
+
+1. Corrija **cada** alerta acima respeitando o \`manifest_path\` de agrupamento.
+2. Siga a árvore de decisão do guia (bump direto → bump do pai → override/resolution).
+3. Execute \`${PACKAGE_MANAGER} install\` na raiz do workspace após as edições.
+`;
 }
 
 function buildPrBody(formattedAlerts) {
   const severityOrder = { critical: 0, high: 1, moderate: 2, low: 3 };
   const sorted = [...formattedAlerts].sort(
-    (a, b) => (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9)
+    (a, b) => (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9),
   );
 
   const rows = sorted
     .map(({ alertNumber, pkg, severity, fixedIn, cve, manifestPath }) =>
-      `| [#${alertNumber}](https://github.com/${owner}/${repo}/security/dependabot/${alertNumber}) | \`${pkg}\` | ${severity.toUpperCase()} | \`${fixedIn}\` | ${cve ?? '—'} | \`${manifestPath}\` |`
+      `| [#${alertNumber}](https://github.com/${owner}/${repo}/security/dependabot/${alertNumber}) | \`${pkg}\` | ${severity.toUpperCase()} | \`${fixedIn}\` | ${cve ?? '—'} | \`${manifestPath}\` |`,
     )
     .join('\n');
 
@@ -164,34 +237,36 @@ async function main() {
   console.log(`Buscando alertas Dependabot (filtro: ${SEVERITY_FILTER})...`);
 
   const alerts = await fetchDependabotAlerts();
+  const formattedAlerts = formatAlerts(alerts);
 
-  if (alerts.length === 0) {
-    console.log('Nenhum alerta Dependabot aberto encontrado para o filtro de severidade selecionado. Nada a fazer.');
+  if (formattedAlerts.length === 0) {
+    console.log(
+      'Nenhum alerta Dependabot npm aberto para o filtro de severidade selecionado (ou só ecossistemas não-npm). Nada a fazer.',
+    );
     if (GITHUB_OUTPUT) writeFileSync(GITHUB_OUTPUT, 'has_alerts=false\n', { flag: 'a' });
     process.exit(0);
   }
 
   if (GITHUB_OUTPUT) writeFileSync(GITHUB_OUTPUT, 'has_alerts=true\n', { flag: 'a' });
-  console.log(`${alerts.length} alerta(s) encontrado(s). Acionando agente Cursor...`);
+  console.log(`${formattedAlerts.length} alerta(s) npm encontrado(s). Acionando agente Cursor...`);
 
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const nomadActionsPath = NOMAD_ACTIONS_PATH ?? join(scriptDir, '../..');
   const repoCwd = GITHUB_WORKSPACE ?? process.cwd();
   const guideDoc = readFileSync(
     join(nomadActionsPath, 'docs/cursor-vulnerability-fixer.md'),
-    'utf8'
+    'utf8',
   );
 
-  const formattedAlerts = formatAlerts(alerts);
   const prBodyPath = join(repoCwd, 'pr-body.md');
   writeFileSync(prBodyPath, buildPrBody(formattedAlerts), 'utf8');
 
-  const prompt = buildPrompt(formattedAlerts, guideDoc);
+  const prompt = buildPrompt(formattedAlerts, guideDoc, repoCwd);
 
   try {
     const result = await Agent.prompt(prompt, {
       apiKey: CURSOR_API_KEY,
-      model: { id: 'default' },
+      model: { id: 'cursor-auto' },
       local: { cwd: repoCwd },
     });
 

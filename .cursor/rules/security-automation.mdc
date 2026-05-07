@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Dependabot e audit
 
-Leia o [`README.md`](../../README.md): workflow reutilizável (`workflow_call`) em `cursor-vulnerability-fixer.yml`, script em `scripts/cursor-vuln-fixer/index.js`, cloud runtime, PR único na branch `security/dependabot-remediation`, gerenciador detectado automaticamente, filtro de severidade via input `severity-filter` (`all` ou `critical-high`).
+Leia o [`README.md`](../../README.md): workflow em `cursor-vulnerability-fixer.yml`, script `scripts/cursor-vuln-fixer/index.js` (runtime **local** no CI, PR via `gh`), branch `security/dependabot-remediation`, alertas agrupados por `manifest_path`, filtro `severity-filter` (`all` ou `critical-high`), audit opcional no job quando há alertas npm.
 
 Para o fluxo manual («Verify issues»): use **`@docs/cursor-vulnerability-fixer.md`** ([`docs/cursor-vulnerability-fixer.md`](../../docs/cursor-vulnerability-fixer.md)) — audit só roda **no terminal do usuário**, Step 0 (`pnpm why` ou `npm ls` / `yarn why`), bump com **versão fixa** (`pnpm add -E`, `npm install --save-exact`, `yarn add --exact`), escopo workspace vs raiz, Step 6 de overrides.
 

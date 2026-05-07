@@ -1,99 +1,55 @@
 # Cursor Vulnerability Fixer
 
-> Remediação proativa de vulnerabilidades com Self-Healing PRs via Cursor Agent.
+> Remediação proativa de vulnerabilidades com PR único via Cursor Agent (SDK) em CI.
 
-Workflow reutilizável (`workflow_call`) que lê os alertas abertos do Dependabot, passa o contexto completo para um agente Cursor via SDK e deixa a IA aplicar as correções — bump direto ou override conforme o grafo — abrindo um único PR consolidado.
+O workflow lê alertas Dependabot (REST, paginação por cursor), monta o prompt com o guia `docs/cursor-vulnerability-fixer.md`, conteúdo dos **manifests afetados** (`manifest_path` por alerta) e aciona o agente em **runtime local** no checkout do Actions. Depois: `audit`, commit na branch `security/dependabot-remediation` e PR com corpo gerado (`pr-body.md`).
 
 ---
 
 ## Fluxo
 
 ```
-`cursor-vulnerability-fixer.yml`  (dispatch manual / workflow_call)
-       ├─ Checkout do repositório alvo
-       ├─ Checkout nomad-actions (scripts + docs)
-       ├─ Detecta gerenciador de pacotes (package-manager.cjs)
-       ├─ scripts/cursor-vuln-fixer/index.js
-       │    ├─ GitHub API → alertas Dependabot abertos filtrados por severidade
-       │    ├─ buildPrompt()
-       │    │    └─ docs/cursor-vulnerability-fixer.md + alertas + gerenciador
-       │    └─ Agent.prompt()  ← @cursor/sdk · cloud runtime · autoCreatePR
-       └─ PR aberto automaticamente pelo agente na branch security/dependabot-remediation
+cursor-vulnerability-fixer.yml  (cron diário / workflow_dispatch / workflow_call)
+  ├─ checkout + branch security/dependabot-remediation
+  ├─ scripts/cursor-vuln-fixer/index.js
+  │    ├─ API Dependabot (GH_DEPENDABOT_ALERTS_TOKEN) + paginação Link/after
+  │    ├─ filtro npm + agrupamento por manifest_path + snapshot dos package.json
+  │    └─ Agent.prompt · local cwd · modelo cursor-auto
+  ├─ pnpm|npm|yarn audit (se houver alertas)
+  ├─ commit + push
+  └─ gh pr create / gh pr edit (--body-file pr-body.md)
 ```
 
 ---
 
-## O que este projeto resolve
+## Secrets e permissões
 
-- **Análise real por IA:** O Cursor Agent recebe o guia de remediação (`docs/cursor-vulnerability-fixer.md`), a lista de alertas com severidade e versão patcheada, e decide a estratégia mais adequada por pacote.
-- **Consolidação em um PR:** Todos os alertas são tratados numa única branch, eliminando o ruído de PRs individuais do Dependabot.
-- **Versões exatas:** O agente é instruído a nunca usar `^` ou `~` — todas as versões são fixas por política.
-- **Multi-gerenciador:** Detecção automática de `pnpm`, `npm` ou `yarn` via lockfile.
-- **Filtro de severidade:** Parâmetro `severity-filter` controla quais alertas processar (`all` ou `critical-high`).
-
----
-
-## Como testar no GitHub
-
-1. Garanta os secrets `CURSOR_TOKEN` e `SRE_SCRIPTS` em *Settings → Secrets and variables → Actions*.
-2. Faça push do branch default com o YAML atualizado.
-3. *Actions* → **Cursor Vulnerability Fixer** → **Run workflow** → escolha `severity-filter` → **Run workflow**.
-
-O mesmo YAML responde a `workflow_dispatch` (disparo manual / cron) e a `workflow_call` (chamado por outro workflow com `uses: <org>/<repo>/.github/workflows/cursor-vulnerability-fixer.yml@<ref>`).
-
----
-
-## Estratégia de remediação
-
-O guia completo está em [`docs/cursor-vulnerability-fixer.md`](docs/cursor-vulnerability-fixer.md). Em resumo:
-
-| Cenário | Ação |
+| Secret | Uso |
 | :--- | :--- |
-| Dependência direta | Bump com versão fixa (`add --save-exact`) |
-| Transitiva rasa | Bump do pacote pai |
-| Transitiva profunda / conflito de major | `pnpm.overrides` / `overrides` / `resolutions` com versão exata |
+| `CURSOR_TOKEN` | API key Cursor (Cloud Agents / dashboard). |
+| `GH_DEPENDABOT_ALERTS_TOKEN` | PAT com leitura de alertas Dependabot (fine-grained: Dependabot alerts Read + SSO na org se aplicável). |
+
+No repositório: **Settings → Actions → General → Workflow permissions** → habilite **Allow GitHub Actions to create and approve pull requests** (senão `gh pr create` falha).
 
 ---
 
-## Configuração e Setup
+## Disparo
 
-### 1. Secrets obrigatórios
-
-| Secret | Descrição |
-| :--- | :--- |
-| `CURSOR_TOKEN` | API key do Cursor, obtida em [cursor.com/dashboard/cloud-agents](https://cursor.com/dashboard/cloud-agents). |
-| `SRE_SCRIPTS` | PAT com acesso ao repositório `nomad-bank/nomad-actions` (checkout dos scripts). |
-
-### 2. Inputs do workflow
-
-| Input | Descrição | Default |
-| :--- | :--- | :--- |
-| `severity-filter` | `"all"` (CRITICAL, HIGH, MODERATE, LOW) ou `"critical-high"` | `all` |
-| `package-manager` | `npm`, `yarn` ou `pnpm`. Detectado automaticamente se omitido. | — |
-| `runner` | Runner a utilizar. | `ubuntu-latest` |
-
-### 3. Permissões necessárias no repositório alvo
-
-- `security-events: read` — leitura dos alertas Dependabot
-- `contents: read` — checkout do código
-
-O PR é criado pelo agente Cursor via cloud runtime com as permissões do `CURSOR_TOKEN`.
+- **Agendado:** `cron` no YAML (ajuste o horário UTC conforme necessidade).
+- **Manual:** Actions → *Cursor Vulnerability Fixer* → Run workflow → `severity-filter`.
+- **Reutilizável:** outro repo pode chamar `uses: <org>/<repo>/.github/workflows/cursor-vulnerability-fixer.yml@<ref>` e passar `secrets: inherit` / `CURSOR_TOKEN`.
 
 ---
 
-## Como funciona o Workflow
+## Comportamento sem gasto de tokens
 
-1. **Detecção:** Busca alertas `state=open` paginados via GitHub API (cursor-based, `Link` header).
-2. **Filtro:** Aplica `severity-filter`; encerra sem erro se não houver alertas no filtro.
-3. **Prompt:** Monta contexto com o guia de remediação, lista de alertas e gerenciador detectado.
-4. **Agente:** `Agent.prompt` (Cursor SDK, cloud runtime) edita `package.json`, executa install e abre PR.
-5. **PR:** Consolidado na branch `security/dependabot-remediation` com descrição gerada pelo agente.
+Se não houver alertas **npm** no filtro, o script grava `has_alerts=false` e os steps de audit, commit e PR são ignorados.
 
 ---
 
 ## Triagem manual no Cursor
 
-Para análise manual no chat, use `@docs/cursor-vulnerability-fixer.md`. A regra `.cursor/rules/security-automation.mdc` orienta o modelo sobre as políticas do repositório.
+Use `@docs/cursor-vulnerability-fixer.md`. Regra: `.cursor/rules/security-automation.mdc`.
 
 ---
 
