@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { Agent, CursorAgentError } from '@cursor/sdk';
+import { Agent, CursorAgentError, IntegrationNotConnectedError } from '@cursor/sdk';
 
 const SEVERITY_MAP = {
   'critical-high': ['critical', 'high'],
@@ -159,6 +159,10 @@ async function main() {
 
     console.log(`Agente finalizado com sucesso. Run ID: ${result.id}`);
   } catch (err) {
+    if (err instanceof IntegrationNotConnectedError) {
+      console.error(`Repositório não conectado ao Cursor. Acesse ${err.helpUrl} para conectar o GitHub.`);
+      process.exit(1);
+    }
     if (err instanceof CursorAgentError) {
       console.error(`Falha ao iniciar o agente Cursor: ${err.message} (retry: ${err.isRetryable})`);
       process.exit(1);
