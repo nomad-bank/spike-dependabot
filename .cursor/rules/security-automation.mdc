@@ -7,6 +7,6 @@ alwaysApply: true
 
 Leia o [`README.md`](../../README.md): automação com **um PR** (branch `security/dependabot-remediation`), `SECURITY_PACKAGE_ROOT`, gerenciador detectado no CI, severidades Critical→Low e overrides condicionais.
 
-Para o fluxo manual («Verify issues»): use **`@docs/verify-issues-dependabot.md`** ([`docs/verify-issues-dependabot.md`](../../docs/verify-issues-dependabot.md)) — audit só roda **no terminal do usuário**, Step 0 (`pnpm why` ou `npm ls` / `yarn why`), bump com **versão fixa** (`pnpm add -E`, `npm install --save-exact`, `yarn add --exact`), escopo workspace vs raiz, Step 6 de overrides.
+Para o fluxo manual («Verify issues»): use **`@docs/cursor-vulnerability-fixer.md`** ([`docs/cursor-vulnerability-fixer.md`](../../docs/cursor-vulnerability-fixer.md)) — audit só roda **no terminal do usuário**, Step 0 (`pnpm why` ou `npm ls` / `yarn why`), bump com **versão fixa** (`pnpm add -E`, `npm install --save-exact`, `yarn add --exact`), escopo workspace vs raiz, Step 6 de overrides.
 
 Não corrigir moderate/low além de listar; Critical/High são o escopo.
