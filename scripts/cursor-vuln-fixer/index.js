@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { Agent, CursorAgentError, IntegrationNotConnectedError } from '@cursor/sdk';
+import { Agent, CursorAgentError } from '@cursor/sdk';
 
 const SEVERITY_MAP = {
   'critical-high': ['critical', 'high'],
@@ -13,7 +13,7 @@ const {
   GITHUB_TOKEN,
   GH_DEPENDABOT_ALERTS_TOKEN,
   GITHUB_REPOSITORY,
-  GITHUB_DEFAULT_BRANCH = 'main',
+  GITHUB_WORKSPACE,
   SEVERITY_FILTER = 'all',
   PACKAGE_MANAGER,
   NOMAD_ACTIONS_PATH,
@@ -134,6 +134,7 @@ async function main() {
 
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const nomadActionsPath = NOMAD_ACTIONS_PATH ?? join(scriptDir, '../..');
+  const repoCwd = GITHUB_WORKSPACE ?? process.cwd();
   const guideDoc = readFileSync(
     join(nomadActionsPath, 'docs/cursor-vulnerability-fixer.md'),
     'utf8'
@@ -145,11 +146,7 @@ async function main() {
     const result = await Agent.prompt(prompt, {
       apiKey: CURSOR_API_KEY,
       model: { id: 'composer-2' },
-      cloud: {
-        repos: [{ url: `https://github.com/${GITHUB_REPOSITORY}`, startingRef: GITHUB_DEFAULT_BRANCH }],
-        autoCreatePR: true,
-        skipReviewerRequest: true,
-      },
+      local: { cwd: repoCwd },
     });
 
     if (result.status !== 'finished') {
@@ -159,10 +156,6 @@ async function main() {
 
     console.log(`Agente finalizado com sucesso. Run ID: ${result.id}`);
   } catch (err) {
-    if (err instanceof IntegrationNotConnectedError) {
-      console.error(`Repositório não conectado ao Cursor. Acesse ${err.helpUrl} para conectar o GitHub.`);
-      process.exit(1);
-    }
     if (err instanceof CursorAgentError) {
       console.error(`Falha ao iniciar o agente Cursor: ${err.message} (retry: ${err.isRetryable})`);
       process.exit(1);
