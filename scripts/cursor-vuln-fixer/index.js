@@ -191,7 +191,7 @@ async function main() {
   try {
     const result = await Agent.prompt(prompt, {
       apiKey: CURSOR_API_KEY,
-      model: { id: 'cursor-auto' },
+      model: { id: 'default' },
       local: { cwd: repoCwd },
     });
 
