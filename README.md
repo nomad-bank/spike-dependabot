@@ -2,7 +2,7 @@
 
 > Remediação proativa de vulnerabilidades com PR único via Cursor Agent (SDK) em CI.
 
-O workflow lê alertas Dependabot (REST, paginação por cursor). Na API do GitHub, **npm, Yarn e pnpm** aparecem como `ecosystem: npm` para pacotes do registry. O script detecta o cliente pelo lockfile (`pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn, senão npm) ou pela env `PACKAGE_MANAGER`, injeta saída de **`pnpm|npm|yarn audit --json`** no prompt e aciona o agente em **runtime local**. Depois: audit no CI, commit na branch `security/dependabot-remediation` e PR (`pr-body.md`).
+O workflow lê alertas Dependabot (REST, paginação por cursor). Na API do GitHub, **npm, Yarn e pnpm** aparecem como `ecosystem: npm` para pacotes do registry. O **@cursor/sdk** é instalado em diretório temporário do runner (`NODE_PATH`), **não** em `scripts/cursor-vuln-fixer/`, para o agente não “remediar” só o subprojeto do script. O script detecta o cliente pelo lockfile na raiz ou pela env `PACKAGE_MANAGER`, injeta **`pnpm|npm|yarn audit --json`** no prompt e aciona o agente com `cwd` na **raiz do repo**. No dispatch manual, o default do filtro de severidade é **all** (alinhado ao total do Security; use **critical-high** só se quiser Critical+High).
 
 ---
 

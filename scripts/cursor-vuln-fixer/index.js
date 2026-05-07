@@ -46,7 +46,7 @@ function extractAfterParamFromLinkHeader(linkHeader) {
   const next = String(linkHeader)
     .split(',')
     .map((s) => s.trim())
-    .find((p) => /;\s*rel="next"\s*$/.test(p));
+    .find((p) => /;\s*rel\s*=\s*"?next"?/i.test(p));
   if (!next) return null;
   const match = next.match(/<([^>]+)>/);
   if (!match) return null;
@@ -72,7 +72,12 @@ async function fetchDependabotAlerts() {
 
     const response = await fetch(url, { headers: buildGithubHeaders(dependabotToken) });
     const text = await response.text();
-    const json = text ? JSON.parse(text) : null;
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error(`Resposta Dependabot não é JSON válido (HTTP ${response.status}): ${text.slice(0, 300)}`);
+    }
 
     if (!response.ok) {
       let detail = text.slice(0, 500);
@@ -91,6 +96,11 @@ async function fetchDependabotAlerts() {
     if (!Array.isArray(json) || json.length === 0) break;
     aggregated.push(...json);
     const nextAfter = extractAfterParamFromLinkHeader(response.headers.get('link'));
+    if (json.length >= 100 && !nextAfter) {
+      console.warn(
+        'Paginação: página com 100 itens mas sem rel=next no Link — possível perda de alertas. Verifique cabeçalho Link da API.',
+      );
+    }
     if (!nextAfter) break;
     afterParam = nextAfter;
   }
@@ -113,6 +123,12 @@ function graphInspectCommand(repoCwd, pm) {
   if (pm === 'pnpm') return '`pnpm why <pacote>` (monorepo: `pnpm why -r <pacote>` ou a partir da pasta do pacote)';
   if (pm === 'yarn') return yarnBerry ? '`yarn npm why <pacote>`' : '`yarn why <pacote>`';
   return '`npm ls <pacote> --all`';
+}
+
+function rootLockfileHint(pm) {
+  if (pm === 'pnpm') return '`pnpm-lock.yaml` na raiz do repositório';
+  if (pm === 'yarn') return '`yarn.lock` (e cache Berry se aplicável) na raiz';
+  return '`package-lock.json` na raiz';
 }
 
 function formatAlerts(alerts) {
@@ -155,7 +171,17 @@ function buildPrompt(formattedAlerts, guideDoc, auditJson, repoCwd, packageManag
     )
     .join('\n');
 
+  const lockHint = rootLockfileHint(packageManager);
+
   return `${guideDoc}
+
+---
+
+## Raiz do projeto (obrigatório)
+
+- Diretório de trabalho do agente: \`${repoCwd}\`
+- Após corrigir manifests, rode **sempre** \`${packageManager} install\` **nesta raiz** para regenerar o lockfile correto: ${lockHint}.
+- O diretório \`scripts/cursor-vuln-fixer/\` contém só o **código deste automation**; no CI o SDK é instalado **fora do repo**. **Não** concentre bumps, \`pnpm.overrides\` ou alterações de lock só nesse subdiretório salvo se um alerta tiver \`manifest_path\` explicitamente apontando para um arquivo dentro dele. O produto quase sempre está na raiz ou em pacotes do monorepo (\`packages/\`, \`apps/\`, etc.), não no script de CI.
 
 ---
 
@@ -233,10 +259,23 @@ async function main() {
     `API Dependabot: ${alerts.length} alerta(s) aberto(s); após filtro registry npm (npm/pnpm/yarn): ${formattedAlerts.length}. Ecossistemas na resposta: ${ecosystemsInApi.length ? ecosystemsInApi.join(', ') : '(nenhum ou estrutura inesperada)'}`,
   );
 
-  if (formattedAlerts.length === 0) {
+  if (alerts.length === 0 && SEVERITY_FILTER === 'critical-high') {
     console.log(
-      'Nenhum alerta do registry npm para processar. Outros ecossistemas (Actions, Docker, Maven, Rubygems, etc.) não são cobertos por este fluxo.',
+      'Dica: com filtro critical-high a API só retorna Critical/High. Se o Security mostra mais alertas (moderate/low), rode o workflow com severity-filter "all".',
     );
+  }
+
+  if (formattedAlerts.length === 0) {
+    if (alerts.length > 0) {
+      console.log(
+        'Nenhum alerta do registry npm na resposta filtrada. Ecossistemas retornados:',
+        ecosystemsInApi.join(', ') || '(vazio — verifique estrutura da API).',
+      );
+    } else {
+      console.log(
+        'Nenhum alerta do registry npm para processar. Outros ecossistemas (Actions, Docker, Maven, Rubygems, etc.) não são cobertos por este fluxo.',
+      );
+    }
     if (GITHUB_OUTPUT) writeFileSync(GITHUB_OUTPUT, 'has_alerts=false\n', { flag: 'a' });
     process.exit(0);
   }
