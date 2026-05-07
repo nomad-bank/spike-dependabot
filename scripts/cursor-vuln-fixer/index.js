@@ -17,6 +17,7 @@ const {
   GITHUB_REPOSITORY,
   GITHUB_WORKSPACE,
   GITHUB_OUTPUT,
+  PR_BODY_PATH,
   SEVERITY_FILTER: SEVERITY_FILTER_RAW,
   PACKAGE_MANAGER,
   NOMAD_ACTIONS_PATH,
@@ -292,7 +293,7 @@ async function main() {
     'utf8',
   );
 
-  const prBodyPath = join(repoCwd, 'pr-body.md');
+  const prBodyPath = PR_BODY_PATH ? PR_BODY_PATH : join(repoCwd, 'pr-body.md');
   writeFileSync(prBodyPath, buildPrBody(formattedAlerts, packageManager), 'utf8');
 
   console.log(`Rodando audit local (${packageManager}) para mapear o grafo...`);
