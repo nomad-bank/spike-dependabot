@@ -9,8 +9,7 @@ Workflow reutilizável (`workflow_call`) que lê os alertas abertos do Dependabo
 ## Fluxo
 
 ```
-Caller workflow (schedule / dispatch)
-  └─ cursor-vulnerability-fixer.yml  (workflow_call)
+`cursor-vulnerability-fixer.yml`  (dispatch manual / workflow_call)
        ├─ Checkout do repositório alvo
        ├─ Checkout nomad-actions (scripts + docs)
        ├─ Detecta gerenciador de pacotes (package-manager.cjs)
@@ -31,6 +30,16 @@ Caller workflow (schedule / dispatch)
 - **Versões exatas:** O agente é instruído a nunca usar `^` ou `~` — todas as versões são fixas por política.
 - **Multi-gerenciador:** Detecção automática de `pnpm`, `npm` ou `yarn` via lockfile.
 - **Filtro de severidade:** Parâmetro `severity-filter` controla quais alertas processar (`all` ou `critical-high`).
+
+---
+
+## Como testar no GitHub
+
+1. Garanta os secrets `CURSOR_TOKEN` e `SRE_SCRIPTS` em *Settings → Secrets and variables → Actions*.
+2. Faça push do branch default com o YAML atualizado.
+3. *Actions* → **Cursor Vulnerability Fixer** → **Run workflow** → escolha `severity-filter` → **Run workflow**.
+
+O mesmo YAML responde a `workflow_dispatch` (disparo manual / cron) e a `workflow_call` (chamado por outro workflow com `uses: <org>/<repo>/.github/workflows/cursor-vulnerability-fixer.yml@<ref>`).
 
 ---
 
