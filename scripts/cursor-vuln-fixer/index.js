@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Agent, CursorAgentError } from '@cursor/sdk';
@@ -14,6 +14,7 @@ const {
   GH_DEPENDABOT_ALERTS_TOKEN,
   GITHUB_REPOSITORY,
   GITHUB_WORKSPACE,
+  GITHUB_OUTPUT,
   SEVERITY_FILTER = 'all',
   PACKAGE_MANAGER,
   NOMAD_ACTIONS_PATH,
@@ -91,18 +92,24 @@ async function fetchDependabotAlerts() {
   return aggregated;
 }
 
-function buildPrompt(alerts, guideDoc) {
-  const alertLines = alerts
-    .map((a) => {
-      const pkg = a.dependency.package.name;
-      const ecosystem = a.dependency.package.ecosystem;
-      const severity = a.security_advisory.severity;
-      const summary = a.security_advisory.summary;
-      const fixedIn =
-        a.security_vulnerability?.first_patched_version?.identifier ?? 'sem patch disponível';
-      const manifestPath = a.dependency.manifest_path;
-      return `- ${pkg} (${ecosystem}) [${severity.toUpperCase()}] — ${summary}. Corrigido em: ${fixedIn}. Manifest: ${manifestPath}`;
-    })
+function formatAlerts(alerts) {
+  return alerts.map((a) => ({
+    pkg: a.dependency.package.name,
+    ecosystem: a.dependency.package.ecosystem,
+    severity: a.security_advisory.severity,
+    summary: a.security_advisory.summary,
+    fixedIn: a.security_vulnerability?.first_patched_version?.identifier ?? 'sem patch disponível',
+    manifestPath: a.dependency.manifest_path,
+    cve: a.security_advisory.cve_id ?? a.security_advisory.ghsa_id,
+    alertNumber: a.number,
+  }));
+}
+
+function buildPrompt(formattedAlerts, guideDoc) {
+  const alertLines = formattedAlerts
+    .map(({ pkg, ecosystem, severity, summary, fixedIn, manifestPath }) =>
+      `- ${pkg} (${ecosystem}) [${severity.toUpperCase()}] — ${summary}. Corrigido em: ${fixedIn}. Manifest: ${manifestPath}`
+    )
     .join('\n');
 
   return `${guideDoc}
@@ -114,10 +121,43 @@ function buildPrompt(alerts, guideDoc) {
 Gerenciador de pacotes: **${PACKAGE_MANAGER}**
 Repositório: **${owner}/${repo}**
 
-Alertas a corrigir (${alerts.length} no total):
+Alertas a corrigir (${formattedAlerts.length} no total):
 ${alertLines}
 
 Aplique a estratégia de remediação do guia acima para corrigir todos os alertas listados. Siga a árvore de decisão em ordem (bump direto → bump do pai → override/resolution). Após aplicar as alterações, execute \`${PACKAGE_MANAGER} install\` para garantir que o lockfile está consistente. Não altere scripts, dependências não relacionadas ou formatação fora das entradas modificadas.`;
+}
+
+function buildPrBody(formattedAlerts) {
+  const severityOrder = { critical: 0, high: 1, moderate: 2, low: 3 };
+  const sorted = [...formattedAlerts].sort(
+    (a, b) => (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9)
+  );
+
+  const rows = sorted
+    .map(({ alertNumber, pkg, severity, fixedIn, cve, manifestPath }) =>
+      `| [#${alertNumber}](https://github.com/${owner}/${repo}/security/dependabot/${alertNumber}) | \`${pkg}\` | ${severity.toUpperCase()} | \`${fixedIn}\` | ${cve ?? '—'} | \`${manifestPath}\` |`
+    )
+    .join('\n');
+
+  return `## Remediação automática de vulnerabilidades Dependabot
+
+Agente Cursor aplicou correções para **${formattedAlerts.length} alerta(s)** (filtro: \`${SEVERITY_FILTER}\`) em \`${PACKAGE_MANAGER}\`.
+
+### Alertas resolvidos
+
+| Alerta | Pacote | Severidade | Versão corrigida | CVE/GHSA | Manifest |
+| ------ | ------ | ---------- | ---------------- | -------- | -------- |
+${rows}
+
+### Estratégia aplicada
+
+O agente seguiu a árvore de decisão do guia de remediação:
+1. **Bump direto** — para dependências declaradas explicitamente
+2. **Bump do pacote pai** — quando o pacote vulnerável é transitivo via um pai atualizável
+3. **Override/resolution** — para transitivas profundas ou conflitos de major
+
+> Gerado automaticamente por [cursor-vuln-fixer](./scripts/cursor-vuln-fixer/index.js).
+`;
 }
 
 async function main() {
@@ -127,9 +167,11 @@ async function main() {
 
   if (alerts.length === 0) {
     console.log('Nenhum alerta Dependabot aberto encontrado para o filtro de severidade selecionado. Nada a fazer.');
+    if (GITHUB_OUTPUT) writeFileSync(GITHUB_OUTPUT, 'has_alerts=false\n', { flag: 'a' });
     process.exit(0);
   }
 
+  if (GITHUB_OUTPUT) writeFileSync(GITHUB_OUTPUT, 'has_alerts=true\n', { flag: 'a' });
   console.log(`${alerts.length} alerta(s) encontrado(s). Acionando agente Cursor...`);
 
   const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -140,12 +182,16 @@ async function main() {
     'utf8'
   );
 
-  const prompt = buildPrompt(alerts, guideDoc);
+  const formattedAlerts = formatAlerts(alerts);
+  const prBodyPath = join(repoCwd, 'pr-body.md');
+  writeFileSync(prBodyPath, buildPrBody(formattedAlerts), 'utf8');
+
+  const prompt = buildPrompt(formattedAlerts, guideDoc);
 
   try {
     const result = await Agent.prompt(prompt, {
       apiKey: CURSOR_API_KEY,
-      model: { id: 'composer-2' },
+      model: { id: 'cursor-auto' },
       local: { cwd: repoCwd },
     });
 
