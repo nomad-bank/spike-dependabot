@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync } from 'fs';
+import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 import { Agent, CursorAgentError } from '@cursor/sdk';
 
 const SEVERITY_MAP = {
@@ -110,66 +112,28 @@ function formatAlerts(alerts) {
     });
 }
 
-function groupAlertsByManifest(formattedAlerts) {
-  const byManifest = new Map();
-  for (const row of formattedAlerts) {
-    const key = row.manifestPath;
-    if (!byManifest.has(key)) byManifest.set(key, []);
-    byManifest.get(key).push(row);
+function runAudit(repoCwd, packageManager) {
+  const isYarnBerry = existsSync(join(repoCwd, '.yarnrc.yml'));
+  const cmd =
+    packageManager === 'pnpm' ? 'pnpm audit --json' :
+    packageManager === 'yarn' ? (isYarnBerry ? 'yarn npm audit --json' : 'yarn audit --json') :
+    'npm audit --json';
+
+  try {
+    return execSync(cmd, { cwd: repoCwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (e) {
+    return e.stdout || '{}';
   }
-  return byManifest;
 }
 
-function readManifestsBlock(repoCwd, manifestPaths) {
-  const blocks = [];
-  for (const rel of manifestPaths) {
-    const full = join(repoCwd, rel);
-    try {
-      const content = readFileSync(full, 'utf8');
-      blocks.push(`### \`${rel}\`
-
-\`\`\`json
-${content}
-\`\`\``);
-    } catch {
-      blocks.push(`### \`${rel}\`
-
-(arquivo inexistente neste checkout — valide o caminho ou crie o manifest se for workspace novo)`);
-    }
-  }
-  return blocks.join('\n\n');
-}
-
-function buildPrompt(formattedAlerts, guideDoc, repoCwd) {
-  const byManifest = groupAlertsByManifest(formattedAlerts);
-  const orderedPaths = [...byManifest.keys()].sort();
-
-  const groupedLines = orderedPaths
-    .map((manifestPath) => {
-      const rows = byManifest.get(manifestPath);
-      const lines = rows
-        .map(
-          ({ alertNumber, pkg, ecosystem, severity, summary, fixedIn, cve }) =>
-            `  - [#${alertNumber}] \`${pkg}\` (${ecosystem}) [${severity.toUpperCase()}] — ${summary} — corrigir em \`${fixedIn}\` — ${cve ?? 'sem CVE'}`,
-        )
-        .join('\n');
-      return `#### \`${manifestPath}\`\n\n${lines}`;
-    })
-    .join('\n\n');
-
-  const manifestsBlock = readManifestsBlock(repoCwd, orderedPaths);
+function buildPrompt(formattedAlerts, guideDoc, auditJson) {
+  const alertLines = formattedAlerts
+    .map(({ alertNumber, pkg, ecosystem, severity, summary, fixedIn, cve, manifestPath }) =>
+      `- [#${alertNumber}] \`${pkg}\` (${ecosystem}) [${severity.toUpperCase()}] — ${summary} — corrigir em \`${fixedIn}\` — ${cve ?? 'sem CVE'} — manifest Dependabot: \`${manifestPath}\``,
+    )
+    .join('\n');
 
   return `${guideDoc}
-
----
-
-## Regra absoluta: manifest do alerta
-
-Cada alerta do GitHub API inclui \`dependency.manifest_path\` — é o **package.json (ou caminho de manifest) onde a dependência vulnerável foi detectada**. Você **deve** aplicar bump direto, bump de pai ou override **no contexto desse manifest e da árvore de workspace descrita pelo lockfile**, e **não** desviar tudo para o \`package.json\` da raiz do repositório.
-
-- Se o alerta está em \`apps/foo/package.json\`, a correção primária é nesse arquivo (ou no pacote-pai do workspace que declara a dependência de acordo com o guia), **não** no \`package.json\` raiz, salvo se a única forma suportada pelo gerenciador for \`overrides\` / \`pnpm.overrides\` na raiz (documente isso no commit).
-- Depois de editar, rode **um** \`${PACKAGE_MANAGER} install\` a partir do **diretório raiz do repositório** (ou do root do workspace indicado pelo lockfile), para que o lockfile global reflita as mudanças.
-- Não altere dependências, scripts ou formatação fora do necessário para corrigir os alertas listados.
 
 ---
 
@@ -177,26 +141,28 @@ Cada alerta do GitHub API inclui \`dependency.manifest_path\` — é o **package
 
 Gerenciador detectado: **${PACKAGE_MANAGER}**
 Repositório: **${owner}/${repo}**
-
 Total de alertas npm: **${formattedAlerts.length}**
 
-### Por arquivo de manifest (origem Dependabot)
-
-${groupedLines}
+${alertLines}
 
 ---
 
-## Conteúdo atual dos manifests envolvidos
+## Saída do audit (fonte primária para identificar os manifests corretos)
 
-${manifestsBlock}
+O audit abaixo reflete o estado real das dependências instaladas neste checkout. **Use-o como fonte primária** para identificar em qual \`package.json\` aplicar cada correção — o campo \`manifest_path\` do Dependabot acima é apenas referência secundária.
+
+\`\`\`json
+${auditJson}
+\`\`\`
 
 ---
 
 ## Sua tarefa
 
-1. Corrija **cada** alerta acima respeitando o \`manifest_path\` de agrupamento.
-2. Siga a árvore de decisão do guia (bump direto → bump do pai → override/resolution).
-3. Execute \`${PACKAGE_MANAGER} install\` na raiz do workspace após as edições.
+1. Analise o audit para localizar o(s) \`package.json\` onde cada pacote vulnerável é declarado.
+2. Se necessário, rode \`${PACKAGE_MANAGER} why <pacote>\` para entender o grafo antes de editar.
+3. Aplique a estratégia do guia (bump direto → bump do pai → override/resolution) **no manifest correto**.
+4. Execute \`${PACKAGE_MANAGER} install\` na raiz do workspace após as edições.
 `;
 }
 
@@ -261,12 +227,15 @@ async function main() {
   const prBodyPath = join(repoCwd, 'pr-body.md');
   writeFileSync(prBodyPath, buildPrBody(formattedAlerts), 'utf8');
 
-  const prompt = buildPrompt(formattedAlerts, guideDoc, repoCwd);
+  console.log('Rodando audit local para mapear grafo de dependências...');
+  const auditJson = runAudit(repoCwd, PACKAGE_MANAGER);
+
+  const prompt = buildPrompt(formattedAlerts, guideDoc, auditJson);
 
   try {
     const result = await Agent.prompt(prompt, {
       apiKey: CURSOR_API_KEY,
-      model: { id: 'cursor-auto' },
+      model: { id: 'default' },
       local: { cwd: repoCwd },
     });
 
