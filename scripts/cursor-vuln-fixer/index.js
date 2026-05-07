@@ -9,7 +9,7 @@ const SEVERITY_MAP = {
 };
 
 const {
-  CURSOR_API_KEY,
+  CURSOR_TOKEN,
   GITHUB_TOKEN,
   GITHUB_REPOSITORY,
   SEVERITY_FILTER = 'all',
@@ -17,33 +17,74 @@ const {
   NOMAD_ACTIONS_PATH,
 } = process.env;
 
+const GITHUB_API_BASE = 'https://api.github.com';
+const GITHUB_API_VERSION = '2026-03-10';
+
 const severities = SEVERITY_MAP[SEVERITY_FILTER] ?? SEVERITY_MAP.all;
 const [owner, repo] = GITHUB_REPOSITORY.split('/');
 
+function buildGithubHeaders(token) {
+  return {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': GITHUB_API_VERSION,
+    'User-Agent': 'cursor-vuln-fixer',
+  };
+}
+
+function extractAfterParamFromLinkHeader(linkHeader) {
+  if (!linkHeader) return null;
+  const next = String(linkHeader)
+    .split(',')
+    .map(s => s.trim())
+    .find(p => /;\s*rel="next"\s*$/.test(p));
+  if (!next) return null;
+  const match = next.match(/<([^>]+)>/);
+  if (!match) return null;
+  try {
+    return new URL(match[1]).searchParams.get('after');
+  } catch {
+    return null;
+  }
+}
+
 async function fetchDependabotAlerts() {
-  const params = new URLSearchParams({
-    state: 'open',
-    severity: severities.join(','),
-    per_page: '100',
-  });
+  const aggregated = [];
+  let afterParam = null;
 
-  const response = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/dependabot/alerts?${params}`,
-    {
-      headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
+  for (;;) {
+    const url = new URL(`${GITHUB_API_BASE}/repos/${owner}/${repo}/dependabot/alerts`);
+    url.searchParams.set('state', 'open');
+    url.searchParams.set('severity', severities.join(','));
+    url.searchParams.set('per_page', '100');
+    if (afterParam) url.searchParams.set('after', afterParam);
+
+    const response = await fetch(url, { headers: buildGithubHeaders(GITHUB_TOKEN) });
+    const text = await response.text();
+    const json = text ? JSON.parse(text) : null;
+
+    if (!response.ok) {
+      let detail = text.slice(0, 500);
+      if (json?.message) {
+        detail = json.message;
+        if (json.documentation_url) detail += ` ${json.documentation_url}`;
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(
+          `Dependabot alerts API HTTP ${response.status}: ${detail}. Verifique as permissões do token (PAT classic: repo ou security_events; fine-grained: Dependabot alerts Read; SSO de org se aplicável).`,
+        );
+      }
+      throw new Error(`Dependabot alerts API HTTP ${response.status}: ${detail}`);
     }
-  );
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Erro na API do GitHub ${response.status}: ${body}`);
+    if (!Array.isArray(json) || json.length === 0) break;
+    aggregated.push(...json);
+    const nextAfter = extractAfterParamFromLinkHeader(response.headers.get('link'));
+    if (!nextAfter) break;
+    afterParam = nextAfter;
   }
 
-  return response.json();
+  return aggregated;
 }
 
 function buildPrompt(alerts, guideDoc) {
@@ -98,7 +139,7 @@ async function main() {
 
   try {
     const result = await Agent.prompt(prompt, {
-      apiKey: CURSOR_API_KEY,
+      apiKey: CURSOR_TOKEN,
       model: { id: 'composer-2' },
       cloud: {
         repos: [{ url: `https://github.com/${GITHUB_REPOSITORY}` }],
