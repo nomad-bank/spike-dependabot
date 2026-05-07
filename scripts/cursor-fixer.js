@@ -6,7 +6,9 @@ const UNIFIED_BRANCH = 'security/dependabot-remediation';
 let PKG_ROOT, REPO_ROOT, PACKAGE_MANAGER;
 
 function executeCommand(cmd, args = [], options = {}) {
-  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  const baseToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  const token =
+    options.ghToken !== undefined && options.ghToken !== '' ? options.ghToken : baseToken;
   const env = { ...process.env, GH_TOKEN: token, ...options.env };
   try {
     return execFileSync(cmd, args, {
@@ -149,8 +151,15 @@ function hasUncommittedChanges() {
 async function runRemediation() {
   prepareEnvironment();
 
-  const repoSlug = executeCommand('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner']).trim();
-  const rawAlerts = executeCommand('gh', ['api', `/repos/${repoSlug}/dependabot/alerts?state=open`]);
+  const repoSlug = (
+    process.env.GITHUB_REPOSITORY ||
+    executeCommand('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner']).trim()
+  ).trim();
+  const alertsToken =
+    process.env.GH_DEPENDABOT_ALERTS_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  const rawAlerts = executeCommand('gh', ['api', `/repos/${repoSlug}/dependabot/alerts?state=open`], {
+    ghToken: alertsToken,
+  });
   const npmAlerts = JSON.parse(rawAlerts).filter(a => a.dependency.package.ecosystem === 'npm');
 
   if (npmAlerts.length === 0) {
